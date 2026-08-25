@@ -1,0 +1,75 @@
+name: Runtimes
+
+# Native runtimes the store downloads on machines whose GPU WSL2 cannot see.
+# whisper.cpp publishes no Vulkan build for Windows, so this job builds the
+# server with GGML_VULKAN and uploads it to the rolling `runtimes` release; the
+# `WHISPER_VULKAN` spec in services.rs points at that asset.
+
+on:
+  workflow_dispatch:
+    inputs:
+      whisper_ref:
+        description: whisper.cpp tag or commit to build
+        default: v1.9.3
+  push:
+    paths:
+      - .github/workflows/runtimes.yml
+
+permissions:
+  contents: write
+
+env:
+  WHISPER_REF: ${{ inputs.whisper_ref || 'v1.9.3' }}
+  VULKAN_VERSION: 1.4.357.0
+
+jobs:
+  whisper-vulkan:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ggml-org/whisper.cpp
+          ref: ${{ env.WHISPER_REF }}
+          path: whisper.cpp
+
+      - name: Install Vulkan SDK
+        shell: pwsh
+        run: |
+          curl.exe -L -o "$env:RUNNER_TEMP\VulkanSDK.exe" "https://sdk.lunarg.com/sdk/download/${env:VULKAN_VERSION}/windows/vulkansdk-windows-X64-${env:VULKAN_VERSION}.exe"
+          & "$env:RUNNER_TEMP\VulkanSDK.exe" --accept-licenses --default-answer --confirm-command install
+          Add-Content $env:GITHUB_ENV "VULKAN_SDK=C:\VulkanSDK\${env:VULKAN_VERSION}"
+          Add-Content $env:GITHUB_PATH "C:\VulkanSDK\${env:VULKAN_VERSION}\bin"
+
+      - name: Build whisper-server with Vulkan
+        shell: pwsh
+        working-directory: whisper.cpp
+        run: |
+          cmake -B build -A x64 -DGGML_VULKAN=ON -DBUILD_SHARED_LIBS=ON -DWHISPER_BUILD_TESTS=OFF -DWHISPER_BUILD_EXAMPLES=ON
+          cmake --build build --config Release --target whisper-server --parallel
+          Get-ChildItem build\bin\Release
+
+      - name: Pack
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force out | Out-Null
+          Copy-Item whisper.cpp\build\bin\Release\*.exe, whisper.cpp\build\bin\Release\*.dll out\
+          Copy-Item whisper.cpp\LICENSE out\LICENSE.whisper.cpp
+          Set-Content out\SOURCE.txt "whisper.cpp ${env:WHISPER_REF}, built with GGML_VULKAN=ON (Vulkan SDK ${env:VULKAN_VERSION}) by ai-app-store-poc runtimes.yml"
+          Compress-Archive -Path out\* -DestinationPath whisper-server-vulkan-x64.zip
+          Get-Item whisper-server-vulkan-x64.zip | Select-Object Name, Length
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: whisper-server-vulkan-x64
+          path: whisper-server-vulkan-x64.zip
+
+      # Rolling release: one fixed tag so the store's download URL never changes.
+      - name: Publish to the `runtimes` release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view runtimes --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
+            gh release create runtimes --repo "$GITHUB_REPOSITORY" --prerelease \
+              --title "Native runtimes" --notes "Rolling builds of native runtimes the store downloads (see .github/workflows/runtimes.yml)."
+          gh release upload runtimes whisper-server-vulkan-x64.zip --repo "$GITHUB_REPOSITORY" --clobber

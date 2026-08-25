@@ -24,11 +24,9 @@ import {
   stopService,
   type Instance,
   type ServiceModel,
-  type ServiceState,
   type ServiceStatus,
 } from "@/lib/api";
 import { ollama } from "@/lib/chat";
-import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -53,6 +51,7 @@ import { Spinner } from "@/components/ui/spinner";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { StatusBadge } from "@/components/StatusBadge";
 import { LogTail } from "@/components/LogTail";
+import { ServiceStateBadge } from "@/components/ServiceStateBadge";
 import { MessageResponse } from "@/components/ai-elements/message";
 
 const VISION_TAG_PREFIXES = ["qwen2.5vl", "gemma3", "llava", "minicpm-v", "moondream"];
@@ -65,33 +64,6 @@ const CV_MIN_SCORE = 0.25;
 type Dimensions = { width: number; height: number };
 
 type Detection = { label: string; box: [number, number, number, number]; score?: number };
-
-const SERVICE_STATE_LABEL: Record<ServiceState, string> = {
-  missing: "Not installed",
-  pulling: "Pulling image",
-  starting: "Starting",
-  running: "Running",
-  stopped: "Stopped",
-  error: "Error",
-};
-
-const SERVICE_STATE_VARIANT: Record<ServiceState, "default" | "secondary" | "destructive" | "outline"> = {
-  missing: "outline",
-  pulling: "secondary",
-  starting: "secondary",
-  running: "default",
-  stopped: "outline",
-  error: "destructive",
-};
-
-function ServiceStateBadge({ state }: { state: ServiceState }) {
-  const animated = state === "pulling" || state === "starting";
-  return (
-    <Badge variant={SERVICE_STATE_VARIANT[state]} className={cn(animated && "animate-pulse")}>
-      {SERVICE_STATE_LABEL[state]}
-    </Badge>
-  );
-}
 
 function isVisionModelTag(tag: string | null): boolean {
   if (!tag) return false;

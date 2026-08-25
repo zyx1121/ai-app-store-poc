@@ -191,9 +191,17 @@ export const onInstanceUpdate = (cb: (i: Instance) => void): Promise<UnlistenFn>
 // CV server for detection).
 // ---------------------------------------------------------------------------
 
-export type ServiceId = "speaches" | "comfyui" | "cv";
+export type ServiceId = "speaches" | "comfyui" | "cv" | "whisper";
 
-export type ServiceState = "missing" | "pulling" | "starting" | "running" | "stopped" | "error";
+/** `unavailable`: this machine's GPU vendor has no implementation of the service. */
+export type ServiceState =
+  | "missing"
+  | "pulling"
+  | "starting"
+  | "running"
+  | "stopped"
+  | "error"
+  | "unavailable";
 
 export type ServiceStatus = {
   id: ServiceId;
@@ -202,10 +210,12 @@ export type ServiceStatus = {
   /** Windows-side port; the service's OpenAI-style API lives at `http://localhost:{port}` */
   port: number;
   url: string;
-  /** the image is present locally (no pull needed on next start) */
+  /** the image (container) or unpacked program (native) is present locally */
   image_present: boolean;
-  /** which implementation this machine got: `cuda`, `cpu`, `triton`, `openvino` */
+  /** which implementation this machine got: `cuda`, `cpu`, `triton`, `openvino`, `vulkan`, `rocm`, `xpu` */
   backend: string;
+  /** `container` inside the WSL2 distro, `native` Windows process, or `none` when unavailable */
+  runtime: "container" | "native" | "none";
   error: string | null;
   log_tail: string[];
 };
@@ -271,6 +281,14 @@ export const COMFYUI_BASE_URL = `http://localhost:${COMFYUI_PORT}`;
 /** Speaches (OpenAI-compatible speech API). Same base for STT and TTS. */
 export const SPEACHES_PORT = 8880;
 export const SPEACHES_BASE_URL = `http://localhost:${SPEACHES_PORT}/v1`;
+
+/**
+ * whisper.cpp server (AMD / Intel GPUs via Vulkan, a native Windows process).
+ * `POST {base}/audio/transcriptions` takes the same multipart form as Speaches
+ * but only WAV audio; the reply is `{ text }`.
+ */
+export const WHISPER_PORT = 8881;
+export const WHISPER_BASE_URL = `http://localhost:${WHISPER_PORT}/v1`;
 
 // ---------------------------------------------------------------------------
 // Chat (base UI for text models). Ollama speaks the OpenAI API on this base.
