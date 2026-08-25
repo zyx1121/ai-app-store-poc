@@ -95,6 +95,20 @@ async fn start_service(
 }
 
 #[tauri::command]
+async fn service_models(id: services::ServiceId) -> CmdResult<Vec<services::ServiceModel>> {
+    cmd(services::models(id).await)
+}
+
+#[tauri::command]
+async fn install_service_model(
+    app: AppHandle,
+    id: services::ServiceId,
+    name: String,
+) -> CmdResult<services::ServiceModel> {
+    cmd(services::install_model(app, id, name).await)
+}
+
+#[tauri::command]
 async fn stop_service(app: AppHandle, id: services::ServiceId) -> CmdResult<()> {
     cmd(services::stop(app, id).await)
 }
@@ -155,6 +169,8 @@ pub fn run() {
             service_status,
             start_service,
             stop_service,
+            service_models,
+            install_service_model,
             open_url,
         ])
         .run(tauri::generate_context!())

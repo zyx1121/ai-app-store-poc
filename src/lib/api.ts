@@ -151,7 +151,7 @@ export const onInstanceUpdate = (cb: (i: Instance) => void): Promise<UnlistenFn>
 // inside the distro (Speaches for STT/TTS now, ComfyUI for images later).
 // ---------------------------------------------------------------------------
 
-export type ServiceId = "speaches";
+export type ServiceId = "speaches" | "comfyui";
 
 export type ServiceState = "missing" | "pulling" | "starting" | "running" | "stopped" | "error";
 
@@ -177,6 +177,20 @@ export const stopService = (id: ServiceId) => invoke<void>("stop_service", { id 
 
 export const onServiceUpdate = (cb: (s: ServiceStatus) => void): Promise<UnlistenFn> =>
   listen<ServiceStatus>("service://update", (ev) => cb(ev.payload));
+
+/** A model file a service needs beyond its image (e.g. a checkpoint for ComfyUI). */
+export type ServiceModel = { name: string; path: string; installed: boolean };
+
+/** Requires the service container to be running (the probe runs inside it). */
+export const serviceModels = (id: ServiceId) => invoke<ServiceModel[]>("service_models", { id });
+
+/** Long-running download into the container; progress lines arrive on `service://update` log_tail. */
+export const installServiceModel = (id: ServiceId, name: string) =>
+  invoke<ServiceModel>("install_service_model", { id, name });
+
+/** ComfyUI HTTP API (`/prompt`, `/history/{id}`, `/view`, `/upload/image`). */
+export const COMFYUI_PORT = 8188;
+export const COMFYUI_BASE_URL = `http://localhost:${COMFYUI_PORT}`;
 
 /** Speaches (OpenAI-compatible speech API). Same base for STT and TTS. */
 export const SPEACHES_PORT = 8880;
