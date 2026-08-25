@@ -65,11 +65,14 @@ export function createChatTransport(modelTag: string) {
     model: ollama(modelTag),
     instructions:
       "You are a helpful assistant running locally on the user's machine. Answer concisely.",
-    // Return only what changes: spreading the whole call back would carry a
-    // `prompt` key next to `messages`, which the SDK rejects.
-    prepareCall: ({ messages }) => ({
-      messages: trimToBudget(messages ?? []),
-    }),
+    // The returned object replaces the call settings (model included).
+    // DirectChatTransport hands the history over as `prompt` (an array of
+    // model messages); only one of `prompt` / `messages` may be returned.
+    prepareCall: ({ messages, prompt, ...rest }) => {
+      const history = messages ?? (Array.isArray(prompt) ? prompt : undefined);
+      if (!history) return { ...rest, prompt };
+      return { ...rest, messages: trimToBudget(history) };
+    },
   });
   return new DirectChatTransport({
     agent,
