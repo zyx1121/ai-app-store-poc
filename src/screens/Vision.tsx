@@ -467,7 +467,7 @@ export function Vision() {
           </CardFooter>
         </Card>
       ) : (
-        <Card size="sm">
+        <Card size="sm" className="shrink-0">
           <CardContent className="flex items-center gap-2">
             <StatusBadge status="running" />
             <span className="text-sm">{visionInstance?.display_name}</span>
@@ -476,12 +476,12 @@ export function Vision() {
       )}
 
       <fieldset disabled={!ready} className="grid min-h-0 flex-1 grid-cols-1 gap-3 disabled:opacity-50 lg:grid-cols-[minmax(0,1fr)_360px]">
-        <Card className="flex min-h-0 flex-col">
+        <Card className="shrink-0">
           <CardHeader>
             <CardTitle>Source</CardTitle>
             <CardDescription>Capture from a camera or pick an image.</CardDescription>
           </CardHeader>
-          <CardContent className="flex min-h-0 flex-1 flex-col gap-3">
+          <CardContent className="flex flex-col gap-3">
             <Tabs value={sourceTab} onValueChange={(v) => v && setSourceTab(v as "camera" | "image")}>
               <TabsList>
                 <TabsTrigger value="camera">Camera</TabsTrigger>
@@ -534,11 +534,11 @@ export function Vision() {
           </CardContent>
         </Card>
 
-        <Card className="flex min-h-0 flex-col">
+        <Card className="shrink-0">
           <CardHeader>
             <CardTitle>Ask &amp; Detect</CardTitle>
           </CardHeader>
-          <CardContent className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto">
+          <CardContent className="flex flex-col gap-3">
             <Tabs value={modeTab} onValueChange={(v) => v && setModeTab(v as "ask" | "detect")}>
               <TabsList>
                 <TabsTrigger value="ask">Ask</TabsTrigger>
