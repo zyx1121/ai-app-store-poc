@@ -426,8 +426,8 @@ export function Audio() {
   }
 
   return (
-    <div className="flex h-full flex-col gap-3 p-6">
-      <Card>
+    <div className="flex h-full flex-col gap-3 overflow-y-auto p-6">
+      <Card className="shrink-0">
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
             <span>Speaches</span>
@@ -467,7 +467,7 @@ export function Audio() {
         </CardFooter>
       </Card>
 
-      <fieldset disabled={!running} className="flex flex-col gap-3 disabled:opacity-50">
+      <fieldset disabled={!running} className="flex shrink-0 flex-col gap-3 disabled:opacity-50">
         <Card>
           <CardHeader>
             <CardTitle>Models</CardTitle>
