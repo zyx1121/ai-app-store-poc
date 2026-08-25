@@ -27,6 +27,8 @@ pub struct SpaceSummary {
     pub likes: u64,
     pub hardware: Option<String>,
     pub app_port: u16,
+    /// entry file for gradio/streamlit Spaces (HF runs `python app.py` itself)
+    pub app_file: String,
     pub title: Option<String>,
     pub emoji: Option<String>,
     pub compat: Compat,
@@ -78,6 +80,8 @@ struct RawCard {
     emoji: Option<String>,
     #[serde(default)]
     app_port: Option<u16>,
+    #[serde(default)]
+    app_file: Option<String>,
     #[serde(default)]
     sdk: Option<String>,
 }
@@ -173,7 +177,14 @@ fn summarize_space(s: RawSpace, runtime: Option<RawRuntime>, has_gpu: bool) -> S
     let author = s.author.unwrap_or(author);
     let card = s.card.unwrap_or_default();
     let sdk = s.sdk.or(card.sdk);
-    let app_port = card.app_port.unwrap_or(7860);
+    let app_port = card.app_port.unwrap_or(match sdk.as_deref() {
+        Some("streamlit") => 8501,
+        _ => 7860,
+    });
+    let app_file = card
+        .app_file
+        .filter(|f| !f.is_empty() && !f.contains(['/', ' ', '\'', '"', ';', '&', '|', '$']))
+        .unwrap_or_else(|| "app.py".to_string());
     let runtime = runtime.unwrap_or_default();
     let hardware = runtime.hardware.and_then(|h| h.requested.or(h.current));
     let (compat, reason) = space_compat(
@@ -190,6 +201,7 @@ fn summarize_space(s: RawSpace, runtime: Option<RawRuntime>, has_gpu: bool) -> S
         likes: s.likes,
         hardware,
         app_port,
+        app_file,
         title: card.title,
         emoji: card.emoji,
         compat,
