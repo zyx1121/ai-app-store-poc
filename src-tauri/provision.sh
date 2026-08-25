@@ -13,7 +13,7 @@ printf '[boot]\nsystemd=true\n[user]\ndefault=root\n' > /etc/wsl.conf
 step "apt: base packages + Docker Engine"
 apt-get update -qq
 apt-get install -y -qq --no-install-recommends \
-  ca-certificates curl gnupg zstd git git-lfs docker.io docker-compose-v2 >/dev/null
+  ca-certificates curl gnupg zstd git git-lfs docker.io docker-buildx docker-compose-v2 >/dev/null
 docker --version
 
 if [ -x /usr/lib/wsl/lib/nvidia-smi ] && /usr/lib/wsl/lib/nvidia-smi -L >/dev/null 2>&1; then

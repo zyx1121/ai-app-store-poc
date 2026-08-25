@@ -1,5 +1,6 @@
 import { useEffect, useState, type KeyboardEvent } from "react";
 import {
+  buildSpace,
   launchModel,
   launchSpace,
   modelFiles,
@@ -23,6 +24,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import {
   Dialog,
   DialogContent,
@@ -76,6 +78,7 @@ export function Browse({ onLaunched }: { onLaunched: () => void }) {
   const [modelsState, setModelsState] = useState<LoadState>("loading");
 
   const [launchingId, setLaunchingId] = useState<string | null>(null);
+  const [buildingId, setBuildingId] = useState<string | null>(null);
   const [launchError, setLaunchError] = useState<string | null>(null);
 
   const [dialogModel, setDialogModel] = useState<ModelSummary | null>(null);
@@ -160,6 +163,19 @@ export function Browse({ onLaunched }: { onLaunched: () => void }) {
     }
   }
 
+  async function runBuildSpace(space: SpaceSummary) {
+    setLaunchError(null);
+    setBuildingId(space.id);
+    try {
+      await buildSpace(space.id);
+      onLaunched();
+    } catch (e) {
+      setLaunchError(String(e));
+    } finally {
+      setBuildingId(null);
+    }
+  }
+
   async function confirmLaunchModel() {
     if (!dialogModel || !selectedFile) return;
     setLaunching(true);
@@ -230,14 +246,37 @@ export function Browse({ onLaunched }: { onLaunched: () => void }) {
                     <span>{formatCount(space.likes)} likes</span>
                     {space.hardware && <span>{space.hardware}</span>}
                   </CardContent>
-                  <CardFooter>
+                  <CardFooter className="flex gap-2">
                     <Button
-                      className="w-full"
+                      className="flex-1"
                       disabled={space.compat === "incompatible" || launchingId === space.id}
                       onClick={() => runSpace(space)}
                     >
                       {launchingId === space.id ? "Launching..." : "Run"}
                     </Button>
+                    {space.sdk !== "static" && (
+                      <Tooltip>
+                        <TooltipTrigger
+                          render={
+                            <Button
+                              variant="outline"
+                              disabled={
+                                buildingId === space.id ||
+                                (space.compat === "incompatible" &&
+                                  (space.compat_reason?.toLowerCase().includes("static") ?? false))
+                              }
+                              onClick={() => runBuildSpace(space)}
+                            />
+                          }
+                        >
+                          {buildingId === space.id ? "Building..." : "Build locally"}
+                        </TooltipTrigger>
+                        <TooltipContent>
+                          Clone the Space and build its image on this machine (CPU on non-NVIDIA
+                          GPUs)
+                        </TooltipContent>
+                      </Tooltip>
+                    )}
                   </CardFooter>
                 </Card>
               ))}
