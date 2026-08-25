@@ -475,7 +475,7 @@ export function Vision() {
         </Card>
       )}
 
-      <fieldset disabled={!ready} className="grid min-h-0 flex-1 grid-cols-1 gap-3 disabled:opacity-50 lg:grid-cols-[minmax(0,1fr)_360px]">
+      <fieldset disabled={!ready} className="grid shrink-0 grid-cols-1 gap-3 disabled:opacity-50 lg:grid-cols-[minmax(0,1fr)_360px]">
         <Card className="shrink-0">
           <CardHeader>
             <CardTitle>Source</CardTitle>
