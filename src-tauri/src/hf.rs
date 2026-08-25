@@ -27,6 +27,8 @@ pub struct SpaceSummary {
     pub likes: u64,
     pub hardware: Option<String>,
     pub app_port: u16,
+    /// entry file for gradio/streamlit Spaces (HF runs `python app.py` itself)
+    pub app_file: String,
     pub title: Option<String>,
     pub emoji: Option<String>,
     pub compat: Compat,
@@ -79,16 +81,20 @@ struct RawCard {
     #[serde(default)]
     app_port: Option<u16>,
     #[serde(default)]
+    app_file: Option<String>,
+    #[serde(default)]
     sdk: Option<String>,
 }
 
-#[derive(Deserialize, Default)]
+#[derive(Deserialize, Default, Clone)]
 struct RawRuntime {
+    #[serde(default)]
+    stage: Option<String>,
     #[serde(default)]
     hardware: Option<RawHardware>,
 }
 
-#[derive(Deserialize, Default)]
+#[derive(Deserialize, Default, Clone)]
 struct RawHardware {
     #[serde(default)]
     requested: Option<String>,
@@ -139,24 +145,22 @@ pub async fn search_spaces(
         let http = http.clone();
         let id = s.id.clone();
         set.spawn(async move {
-            let hw = get::<RawSpace>(&http, &format!("{HF}/spaces/{id}"))
+            let rt = get::<RawSpace>(&http, &format!("{HF}/spaces/{id}"))
                 .await
                 .ok()
-                .and_then(|d| d.runtime)
-                .and_then(|r| r.hardware)
-                .and_then(|h| h.requested.or(h.current));
-            (i, hw)
+                .and_then(|d| d.runtime);
+            (i, rt)
         });
     }
-    let mut hardware: Vec<Option<String>> = vec![None; raw.len()];
-    while let Some(Ok((i, hw))) = set.join_next().await {
-        hardware[i] = hw;
+    let mut runtimes: Vec<Option<RawRuntime>> = vec![None; raw.len()];
+    while let Some(Ok((i, rt))) = set.join_next().await {
+        runtimes[i] = rt;
     }
 
     Ok(raw
         .into_iter()
-        .zip(hardware)
-        .map(|(s, hw)| summarize_space(s, hw, has_gpu))
+        .zip(runtimes)
+        .map(|(s, rt)| summarize_space(s, rt, has_gpu))
         .collect())
 }
 
@@ -164,21 +168,31 @@ pub async fn search_spaces(
 pub async fn space(http: &reqwest::Client, id: &str, has_gpu: bool) -> Result<SpaceSummary> {
     validate_repo(id)?;
     let d: RawSpace = get(http, &format!("{HF}/spaces/{id}")).await?;
-    let hw = d
-        .runtime
-        .as_ref()
-        .and_then(|r| r.hardware.as_ref())
-        .and_then(|h| h.requested.clone().or(h.current.clone()));
-    Ok(summarize_space(d, hw, has_gpu))
+    let rt = d.runtime.clone();
+    Ok(summarize_space(d, rt, has_gpu))
 }
 
-fn summarize_space(s: RawSpace, hardware: Option<String>, has_gpu: bool) -> SpaceSummary {
+fn summarize_space(s: RawSpace, runtime: Option<RawRuntime>, has_gpu: bool) -> SpaceSummary {
     let (author, name) = split_repo(&s.id);
     let author = s.author.unwrap_or(author);
     let card = s.card.unwrap_or_default();
     let sdk = s.sdk.or(card.sdk);
-    let app_port = card.app_port.unwrap_or(7860);
-    let (compat, reason) = space_compat(sdk.as_deref(), hardware.as_deref(), has_gpu);
+    let app_port = card.app_port.unwrap_or(match sdk.as_deref() {
+        Some("streamlit") => 8501,
+        _ => 7860,
+    });
+    let app_file = card
+        .app_file
+        .filter(|f| !f.is_empty() && !f.contains(['/', ' ', '\'', '"', ';', '&', '|', '$']))
+        .unwrap_or_else(|| "app.py".to_string());
+    let runtime = runtime.unwrap_or_default();
+    let hardware = runtime.hardware.and_then(|h| h.requested.or(h.current));
+    let (compat, reason) = space_compat(
+        sdk.as_deref(),
+        runtime.stage.as_deref(),
+        hardware.as_deref(),
+        has_gpu,
+    );
     SpaceSummary {
         id: s.id,
         author,
@@ -187,6 +201,7 @@ fn summarize_space(s: RawSpace, hardware: Option<String>, has_gpu: bool) -> Spac
         likes: s.likes,
         hardware,
         app_port,
+        app_file,
         title: card.title,
         emoji: card.emoji,
         compat,
@@ -194,7 +209,29 @@ fn summarize_space(s: RawSpace, hardware: Option<String>, has_gpu: bool) -> Spac
     }
 }
 
-fn space_compat(sdk: Option<&str>, hw: Option<&str>, has_gpu: bool) -> (Compat, Option<String>) {
+/// `stage` is HF's own build/run state. Only a Space that built on HF has an
+/// image in `registry.hf.space`; a broken one cannot be pulled at all.
+fn space_compat(
+    sdk: Option<&str>,
+    stage: Option<&str>,
+    hw: Option<&str>,
+    has_gpu: bool,
+) -> (Compat, Option<String>) {
+    match stage {
+        Some("RUNNING")
+        | Some("SLEEPING")
+        | Some("PAUSED")
+        | Some("RUNNING_APP_STARTING")
+        | None => {}
+        Some(other) => {
+            return (
+                Compat::Incompatible,
+                Some(format!(
+                    "Space is `{other}` on Hugging Face; no image to pull"
+                )),
+            )
+        }
+    }
     match sdk {
         Some("static") => {
             return (
@@ -388,21 +425,36 @@ mod tests {
 
     #[test]
     fn space_verdicts() {
+        let run = Some("RUNNING");
         assert_eq!(
-            space_compat(Some("static"), None, true).0,
+            space_compat(Some("static"), run, None, true).0,
             Compat::Incompatible
         );
         assert_eq!(
-            space_compat(Some("gradio"), Some("cpu-basic"), false).0,
+            space_compat(Some("gradio"), run, Some("cpu-basic"), false).0,
             Compat::Ready
         );
         assert_eq!(
-            space_compat(Some("gradio"), Some("zero-a10g"), true).0,
+            space_compat(Some("gradio"), run, Some("zero-a10g"), true).0,
             Compat::Maybe
         );
         assert_eq!(
-            space_compat(Some("docker"), Some("t4-small"), false).0,
+            space_compat(Some("docker"), run, Some("t4-small"), false).0,
             Compat::Incompatible
+        );
+        assert_eq!(
+            space_compat(
+                Some("gradio"),
+                Some("RUNTIME_ERROR"),
+                Some("cpu-basic"),
+                true
+            )
+            .0,
+            Compat::Incompatible
+        );
+        assert_eq!(
+            space_compat(Some("gradio"), Some("SLEEPING"), Some("cpu-basic"), true).0,
+            Compat::Ready
         );
     }
 

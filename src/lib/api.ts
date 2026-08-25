@@ -57,8 +57,10 @@ export type SpaceSummary = {
   likes: number;
   /** HF hardware tier the Space asks for, e.g. `cpu-basic`, `zero-a10g`, `t4-small` */
   hardware: string | null;
-  /** port the container listens on (Gradio default 7860) */
+  /** port the container listens on (Gradio default 7860, Streamlit 8501) */
   app_port: number;
+  /** entry file for gradio/streamlit Spaces, default `app.py` */
+  app_file: string;
   title: string | null;
   emoji: string | null;
   compat: Compat;

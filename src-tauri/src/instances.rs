@@ -165,18 +165,39 @@ pub async fn launch_space(app: AppHandle, id: String) -> Result<Instance> {
 
     let image = format!("registry.hf.space/{}:latest", slug(&id));
     let gpu = state.has_gpu();
-    let app_port = space.app_port;
     let app2 = app.clone();
     tokio::spawn(async move {
-        if let Err(e) = run_space(&app2, &inst_id, &image, app_port, gpu).await {
+        if let Err(e) = run_space(&app2, &inst_id, &image, &space, gpu).await {
             fail(&app2, &inst_id, e.to_string());
         }
     });
     Ok(inst)
 }
 
-async fn run_space(app: &AppHandle, id: &str, image: &str, app_port: u16, gpu: bool) -> Result<()> {
+/// HF Space images carry no CMD; the Hub starts them with a command derived
+/// from the SDK. Mirror that, but leave images that define their own command alone.
+fn space_command(sdk: Option<&str>, app_file: &str, app_port: u16, image_has_cmd: bool) -> String {
+    if image_has_cmd {
+        return String::new();
+    }
+    match sdk {
+        Some("gradio") => format!("python {app_file}"),
+        Some("streamlit") => format!(
+            "streamlit run {app_file} --server.port {app_port} --server.address 0.0.0.0 --server.headless true"
+        ),
+        _ => String::new(),
+    }
+}
+
+async fn run_space(
+    app: &AppHandle,
+    id: &str,
+    image: &str,
+    space: &hf::SpaceSummary,
+    gpu: bool,
+) -> Result<()> {
     let cname = container_name(id);
+    let app_port = space.app_port;
     push_log(app, id, format!("docker pull {image}"));
     let child = wsl::spawn_sh(&format!("docker pull {image} 2>&1"))?;
     let code = wsl::stream_lines(child, |l| push_log(app, id, l)).await?;
@@ -186,17 +207,36 @@ async fn run_space(app: &AppHandle, id: &str, image: &str, app_port: u16, gpu: b
         )));
     }
 
+    let inspect = wsl::sh(&format!(
+        "docker inspect -f '{{{{len .Config.Cmd}}}} {{{{len .Config.Entrypoint}}}}' {image}"
+    ))
+    .await?;
+    let image_has_cmd = inspect
+        .stdout
+        .split_whitespace()
+        .any(|n| n.parse::<u32>().map(|v| v > 0).unwrap_or(false));
+    let command = space_command(
+        space.sdk.as_deref(),
+        &space.app_file,
+        app_port,
+        image_has_cmd,
+    );
+    if command.is_empty() && !image_has_cmd {
+        return Err(Error::Other(format!(
+            "image has no start command and SDK `{}` has no default; cannot launch",
+            space.sdk.as_deref().unwrap_or("unknown")
+        )));
+    }
+
     let port = free_port()?;
     let gpu_flag = if gpu { "--gpus all" } else { "" };
-    let repo = get(&app.state::<AppState>(), id)
-        .map(|i| i.repo)
-        .unwrap_or_default();
+    let repo = &space.id;
     let run = format!(
         "docker rm -f {cname} >/dev/null 2>&1; \
          docker run -d --name {cname} {gpu_flag} -p {port}:{app_port} \
            --label aias.kind=space --label aias.repo='{repo}' --label aias.port={port} \
            -e PORT={app_port} -e GRADIO_SERVER_NAME=0.0.0.0 -e GRADIO_SERVER_PORT={app_port} \
-           {image}"
+           {image} {command}"
     );
     update(app, id, |i| {
         i.status = Status::Starting;
@@ -205,7 +245,7 @@ async fn run_space(app: &AppHandle, id: &str, image: &str, app_port: u16, gpu: b
     push_log(
         app,
         id,
-        format!("docker run -p {port}:{app_port} {gpu_flag}"),
+        format!("docker run -p {port}:{app_port} {gpu_flag} {image} {command}"),
     );
     wsl::sh(&run).await?.require("docker run")?;
 
@@ -417,5 +457,22 @@ pub async fn discover(app: &AppHandle) {
         if let Some(inst) = get(&state, &id) {
             let _ = app.emit(UPDATE_EVENT, inst);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::space_command;
+
+    #[test]
+    fn derives_start_command() {
+        assert_eq!(
+            space_command(Some("gradio"), "app.py", 7860, false),
+            "python app.py"
+        );
+        assert!(space_command(Some("streamlit"), "main.py", 8501, false)
+            .starts_with("streamlit run main.py"));
+        assert_eq!(space_command(Some("docker"), "app.py", 7860, true), "");
+        assert_eq!(space_command(Some("docker"), "app.py", 7860, false), "");
     }
 }
