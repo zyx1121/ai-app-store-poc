@@ -44,7 +44,7 @@ jobs:
         shell: pwsh
         working-directory: whisper.cpp
         run: |
-          cmake -B build -G "Visual Studio 17 2022" -A x64 -DGGML_VULKAN=ON -DBUILD_SHARED_LIBS=ON -DWHISPER_BUILD_TESTS=OFF -DWHISPER_BUILD_EXAMPLES=ON
+          cmake -B build -A x64 -DGGML_VULKAN=ON -DBUILD_SHARED_LIBS=ON -DWHISPER_BUILD_TESTS=OFF -DWHISPER_BUILD_EXAMPLES=ON
           cmake --build build --config Release --target whisper-server --parallel
           Get-ChildItem build\bin\Release
 
