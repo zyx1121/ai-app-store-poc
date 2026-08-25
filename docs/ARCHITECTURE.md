@@ -1,0 +1,73 @@
+# Architecture
+
+This PoC is one vertical slice of a unified edge AI runtime: a store that
+installs a runtime on heterogeneous devices and runs apps and models from
+public hubs on it. The slice covers Windows + NVIDIA + Hugging Face. This
+document records the full layer model so the slice stays aligned with it.
+
+## Layer model
+
+```text
+  control plane   fleet, OTA, registry mirror, accounts        (not in PoC)
+  ─────────────────────────────────────────────────────────────────────────
+  app layer       OCI image + Compose-style manifest            Spaces
+                  base UIs per modality: chat / voice / camera  Chat only
+  model layer     model artifact + inference API                GGUF via Ollama
+                  runtime chosen per hardware                   OpenAI-compatible
+  driver layer    kernel driver on host + CDI for containers    NVIDIA toolkit
+  host            Windows + WSL2 distro / Linux                 WSL2 distro
+```
+
+Two rules make "write once, deploy many" real:
+
+1. **Apps declare, the platform resolves.** An app never bundles a runtime
+   tied to a GPU vendor. It declares what it needs (accelerator class, VRAM,
+   a model by id) and the platform picks the runtime build for the device.
+2. **The unified surface is the API, not the binary.** Apps talk to models
+   over an OpenAI-compatible (LLM) or KServe v2 (CV) endpoint on localhost.
+   Behind it the platform runs vLLM, Ollama, OpenVINO Model Server, or an NPU
+   vendor stack. Arbitrary CUDA code cannot be translated to an NPU; a model
+   behind an API can be.
+
+## Compatibility verdicts
+
+The store shows, per device, whether an item can run before the user clicks.
+Verdicts are built from three sources of increasing confidence:
+
+| Source | Example | Confidence |
+|--------|---------|------------|
+| Adapter inference | Space SDK `static`, HF hardware tier `zero-a10g`, GGUF size vs VRAM | low |
+| Developer manifest | declared accelerator, VRAM, ports (Compose `deploy.resources`, `models:`) | medium |
+| CI on reference devices | the image actually ran on this hardware class | high |
+
+The PoC implements the first row: `ready` / `maybe` / `incompatible` with a
+reason string. An `incompatible` item cannot be launched.
+
+## What the PoC implements
+
+| Piece | Implementation |
+|-------|----------------|
+| Runtime detection | `wsl.exe --status`, distro list, one probe script inside the distro (Docker, NVIDIA runtime, Ollama, GPU name and VRAM) |
+| Provisioning | `wsl --install --no-distribution`, `wsl --install -d Ubuntu-24.04 --name ai-app-store --no-launch`, then `provision.sh` over stdin, then a distro restart so systemd owns Docker and Ollama |
+| Keepalive | WSL stops a distro seconds after its last client exits; the app holds `wsl -d ai-app-store -- sleep infinity` while it runs |
+| Spaces | `docker pull registry.hf.space/<owner>-<name>:latest`, `docker run -p <free port>:<app_port> --gpus all`, poll the port until it answers; labels `aias.*` let a restarted app re-adopt containers |
+| Models | `ollama pull hf.co/<repo>:<quant>`, warm load through `/api/generate`, served on `localhost:11434/v1`; the Chat screen streams from it directly |
+| Contract | every command and event is typed once in `src/lib/api.ts`; the Rust side mirrors it with serde |
+
+## What a product adds
+
+- **Installer**: MSI (Tauri bundler) that also ships a pre-baked distro rootfs
+  (`wsl --import`) instead of provisioning over the network; silent install
+  for system integrators (`msiexec /qn`), offline bundle, EV signing.
+- **Updates on three channels**: app via MSI upgrade or `tauri-plugin-updater`;
+  distro via A/B import and switch; apps and models via new image tags.
+  The agent is the channel that updates the other two, so it ships first.
+- **Fleet**: device profiles reported to a control plane, staged rollouts,
+  rollback, on-prem registry mirror for sites without internet.
+- **Heterogeneous hardware**: OpenVINO (Intel), ROCm (AMD), NPU vendor
+  backends behind the same inference API; CDI spec files per accelerator.
+- **Private hub**: Harbor for images and model artifacts, a catalog frontend,
+  CI that builds one image tag per hardware class. Imports from Hugging Face
+  and GitHub go through the same CI so devices only ever pull.
+- **Base UIs**: voice (STT/TTS) and camera/video (CV) next to Chat, chosen by
+  the model's `pipeline_tag`.
