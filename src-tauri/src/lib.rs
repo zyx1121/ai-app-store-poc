@@ -1,7 +1,9 @@
+mod build;
 mod error;
 mod hardware;
 mod hf;
 mod instances;
+mod ollama;
 mod runtime;
 mod services;
 mod state;
@@ -55,6 +57,11 @@ async fn launch_space(app: AppHandle, id: String) -> CmdResult<instances::Instan
 }
 
 #[tauri::command]
+async fn build_space(app: AppHandle, id: String) -> CmdResult<instances::Instance> {
+    cmd(instances::build_space(app, id).await)
+}
+
+#[tauri::command]
 async fn launch_model(
     app: AppHandle,
     repo: String,
@@ -96,8 +103,11 @@ async fn start_service(
 }
 
 #[tauri::command]
-async fn service_models(id: services::ServiceId) -> CmdResult<Vec<services::ServiceModel>> {
-    cmd(services::models(id).await)
+async fn service_models(
+    app: AppHandle,
+    id: services::ServiceId,
+) -> CmdResult<Vec<services::ServiceModel>> {
+    cmd(services::models(&app, id).await)
 }
 
 #[tauri::command]
@@ -128,6 +138,8 @@ fn open_url(app: AppHandle, url: String) -> CmdResult<()> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .plugin(
             tauri_plugin_log::Builder::new()
                 .level(log::LevelFilter::Info)
@@ -163,6 +175,7 @@ pub fn run() {
             search_models,
             model_files,
             launch_space,
+            build_space,
             launch_model,
             list_instances,
             stop_instance,

@@ -24,6 +24,7 @@ pub struct SpaceSummary {
     pub author: String,
     pub name: String,
     pub sdk: Option<String>,
+    pub sdk_version: Option<String>,
     pub likes: u64,
     pub hardware: Option<String>,
     pub app_port: u16,
@@ -84,6 +85,8 @@ struct RawCard {
     app_file: Option<String>,
     #[serde(default)]
     sdk: Option<String>,
+    #[serde(default)]
+    sdk_version: Option<String>,
 }
 
 #[derive(Deserialize, Default, Clone)]
@@ -198,6 +201,7 @@ fn summarize_space(s: RawSpace, runtime: Option<RawRuntime>, has_gpu: bool) -> S
         author,
         name,
         sdk,
+        sdk_version: card.sdk_version,
         likes: s.likes,
         hardware,
         app_port,

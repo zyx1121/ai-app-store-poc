@@ -4,6 +4,7 @@ import { cn } from "@/lib/utils";
 
 const LABEL: Record<InstanceStatus, string> = {
   pulling: "Pulling",
+  building: "Building",
   starting: "Starting",
   running: "Running",
   error: "Error",
@@ -15,6 +16,7 @@ const VARIANT: Record<
   "default" | "secondary" | "destructive" | "outline"
 > = {
   pulling: "secondary",
+  building: "secondary",
   starting: "secondary",
   running: "default",
   error: "destructive",
@@ -22,7 +24,7 @@ const VARIANT: Record<
 };
 
 export function StatusBadge({ status }: { status: InstanceStatus }) {
-  const animated = status === "pulling" || status === "starting";
+  const animated = status === "pulling" || status === "building" || status === "starting";
   return (
     <Badge variant={VARIANT[status]} className={cn(animated && "animate-pulse")}>
       {LABEL[status]}

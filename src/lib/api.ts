@@ -4,6 +4,8 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { check as checkUpdate, type DownloadEvent } from "@tauri-apps/plugin-updater";
+import { relaunch as relaunchApp } from "@tauri-apps/plugin-process";
 
 // ---------------------------------------------------------------------------
 // Runtime (WSL2 distro + Docker + NVIDIA + Ollama)
@@ -79,6 +81,7 @@ export type SpaceSummary = {
   author: string;
   name: string;
   sdk: string | null;
+  sdk_version: string | null;
   likes: number;
   /** HF hardware tier the Space asks for, e.g. `cpu-basic`, `zero-a10g`, `t4-small` */
   hardware: string | null;
@@ -128,7 +131,7 @@ export const modelFiles = (repo: string) => invoke<GgufFile[]>("model_files", { 
 
 export type InstanceKind = "space" | "model";
 
-export type InstanceStatus = "pulling" | "starting" | "running" | "error" | "stopped";
+export type InstanceStatus = "pulling" | "building" | "starting" | "running" | "error" | "stopped";
 
 export type Instance = {
   /** stable id, safe for DOM keys and container names */
@@ -148,9 +151,18 @@ export type Instance = {
   /** last few log lines, most recent last */
   log_tail: string[];
   started_at: string;
+  /** image was built on this machine instead of pulled from the Hub */
+  local_build: boolean;
 };
 
 export const launchSpace = (id: string) => invoke<Instance>("launch_space", { id });
+
+/**
+ * Clone the Space and build its image here, then run it. For GPUs the Hub never
+ * built for (AMD, Intel, CPU) and for Spaces without an image. Non-NVIDIA builds
+ * target the CPU; Spaces needing CUDA-only packages are refused with the reason.
+ */
+export const buildSpace = (id: string) => invoke<Instance>("build_space", { id });
 
 /**
  * `repo` is a Hugging Face GGUF repo (`owner/name`) with `quant` the file's quant tag,
@@ -189,6 +201,8 @@ export type ServiceStatus = {
   url: string;
   /** the image is present locally (no pull needed on next start) */
   image_present: boolean;
+  /** which implementation this machine got: `cuda` or `cpu` */
+  backend: string;
   error: string | null;
   log_tail: string[];
 };
@@ -227,3 +241,48 @@ export const SPEACHES_BASE_URL = `http://localhost:${SPEACHES_PORT}/v1`;
 // ---------------------------------------------------------------------------
 
 export const OLLAMA_BASE_URL = "http://localhost:11434/v1";
+
+// ---------------------------------------------------------------------------
+// Store self-update (tauri-plugin-updater). The endpoint is the repository's
+// latest GitHub Release; the MSI is verified against the public key in
+// tauri.conf.json before it is installed.
+// ---------------------------------------------------------------------------
+
+export type AvailableUpdate = {
+  version: string;
+  currentVersion: string;
+  date: string | null;
+  notes: string | null;
+};
+
+export const APP_VERSION = __APP_VERSION__;
+
+let pendingUpdate: Awaited<ReturnType<typeof checkUpdate>> = null;
+
+/** Resolves to null when this build is current or the endpoint is unreachable (error is thrown then). */
+export async function checkForUpdate(): Promise<AvailableUpdate | null> {
+  pendingUpdate = await checkUpdate();
+  if (!pendingUpdate) return null;
+  return {
+    version: pendingUpdate.version,
+    currentVersion: pendingUpdate.currentVersion,
+    date: pendingUpdate.date ?? null,
+    notes: pendingUpdate.body ?? null,
+  };
+}
+
+/** Download and install the update found by `checkForUpdate`; progress in bytes. */
+export async function installUpdate(
+  onProgress?: (downloaded: number, total: number | null) => void,
+): Promise<void> {
+  if (!pendingUpdate) throw new Error("call checkForUpdate first");
+  let downloaded = 0;
+  let total: number | null = null;
+  await pendingUpdate.downloadAndInstall((ev: DownloadEvent) => {
+    if (ev.event === "Started") total = ev.data.contentLength ?? null;
+    else if (ev.event === "Progress") downloaded += ev.data.chunkLength;
+    onProgress?.(downloaded, total);
+  });
+}
+
+export const relaunch = () => relaunchApp();
