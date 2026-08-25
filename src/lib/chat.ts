@@ -65,8 +65,9 @@ export function createChatTransport(modelTag: string) {
     model: ollama(modelTag),
     instructions:
       "You are a helpful assistant running locally on the user's machine. Answer concisely.",
-    prepareCall: ({ messages, ...rest }) => ({
-      ...rest,
+    // Return only what changes: spreading the whole call back would carry a
+    // `prompt` key next to `messages`, which the SDK rejects.
+    prepareCall: ({ messages }) => ({
       messages: trimToBudget(messages ?? []),
     }),
   });
