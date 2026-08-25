@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { MessageSquare, Play, Settings, Store } from "lucide-react";
+import { MessageSquare, Mic, Play, Settings, Store } from "lucide-react";
 import { runtimeStatus, type RuntimeStatus } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -7,8 +7,9 @@ import { Setup } from "@/screens/Setup";
 import { Browse } from "@/screens/Browse";
 import { Running } from "@/screens/Running";
 import { Chat } from "@/screens/Chat";
+import { Audio } from "@/screens/Audio";
 
-type Route = "browse" | "running" | "chat" | "setup";
+type Route = "browse" | "running" | "chat" | "audio" | "setup";
 
 function App() {
   const [status, setStatus] = useState<RuntimeStatus | null>(null);
@@ -37,6 +38,7 @@ function App() {
     { key: "browse", label: "Browse", icon: Store },
     { key: "running", label: "Running", icon: Play },
     { key: "chat", label: "Chat", icon: MessageSquare },
+    { key: "audio", label: "Audio", icon: Mic },
     { key: "setup", label: "Setup", icon: Settings },
   ];
 
@@ -70,6 +72,7 @@ function App() {
               {activeScreen === "setup" && <Setup status={status} onStatusChange={setStatus} />}
               {activeScreen === "browse" && <Browse onLaunched={() => setRoute("running")} />}
               {activeScreen === "running" && <Running onOpenChat={openChat} />}
+              {activeScreen === "audio" && <Audio />}
             </div>
           )}
         </main>

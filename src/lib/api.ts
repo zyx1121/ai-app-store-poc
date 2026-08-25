@@ -127,6 +127,10 @@ export type Instance = {
 
 export const launchSpace = (id: string) => invoke<Instance>("launch_space", { id });
 
+/**
+ * `repo` is a Hugging Face GGUF repo (`owner/name`) with `quant` the file's quant tag,
+ * or a bare Ollama library name (`qwen2.5vl`) with `quant` the library tag (`7b`).
+ */
 export const launchModel = (repo: string, quant: string) =>
   invoke<Instance>("launch_model", { repo, quant });
 
@@ -141,6 +145,42 @@ export const openUrl = (url: string) => invoke<void>("open_url", { url });
 /** Fires whenever an instance changes status or gains log lines. */
 export const onInstanceUpdate = (cb: (i: Instance) => void): Promise<UnlistenFn> =>
   listen<Instance>("instance://update", (ev) => cb(ev.payload));
+
+// ---------------------------------------------------------------------------
+// Platform services: extra inference servers the store runs as containers
+// inside the distro (Speaches for STT/TTS now, ComfyUI for images later).
+// ---------------------------------------------------------------------------
+
+export type ServiceId = "speaches";
+
+export type ServiceState = "missing" | "pulling" | "starting" | "running" | "stopped" | "error";
+
+export type ServiceStatus = {
+  id: ServiceId;
+  display_name: string;
+  state: ServiceState;
+  /** Windows-side port; the service's OpenAI-style API lives at `http://localhost:{port}` */
+  port: number;
+  url: string;
+  /** the image is present locally (no pull needed on next start) */
+  image_present: boolean;
+  error: string | null;
+  log_tail: string[];
+};
+
+export const serviceStatus = (id: ServiceId) => invoke<ServiceStatus>("service_status", { id });
+
+/** Pulls the image if needed, starts the container, waits for health. Progress on `service://update`. */
+export const startService = (id: ServiceId) => invoke<ServiceStatus>("start_service", { id });
+
+export const stopService = (id: ServiceId) => invoke<void>("stop_service", { id });
+
+export const onServiceUpdate = (cb: (s: ServiceStatus) => void): Promise<UnlistenFn> =>
+  listen<ServiceStatus>("service://update", (ev) => cb(ev.payload));
+
+/** Speaches (OpenAI-compatible speech API). Same base for STT and TTS. */
+export const SPEACHES_PORT = 8880;
+export const SPEACHES_BASE_URL = `http://localhost:${SPEACHES_PORT}/v1`;
 
 // ---------------------------------------------------------------------------
 // Chat (base UI for text models). Ollama speaks the OpenAI API on this base.

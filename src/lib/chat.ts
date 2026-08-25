@@ -13,7 +13,8 @@ export const CONTEXT_TOKENS = 16_384;
 const OUTPUT_RESERVE_TOKENS = 4_096;
 const INPUT_BUDGET_TOKENS = CONTEXT_TOKENS - OUTPUT_RESERVE_TOKENS;
 
-const ollama = createOpenAICompatible({
+/** Provider for every Ollama-served model; other screens reuse it for one-shot generation. */
+export const ollama = createOpenAICompatible({
   name: "ollama",
   baseURL: OLLAMA_BASE_URL,
   apiKey: "ollama",
