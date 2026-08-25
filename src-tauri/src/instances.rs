@@ -269,10 +269,20 @@ async fn wait_for_http(app: &AppHandle, id: &str, port: u16, cname: &str) -> Res
         .timeout(Duration::from_secs(3))
         .build()?;
     let url = format!("http://localhost:{port}/");
+    let mut last_status: Option<u16> = None;
     for tick in 0..150u32 {
         tokio::time::sleep(Duration::from_secs(2)).await;
-        if http.get(&url).send().await.is_ok() {
-            return Ok(());
+        // Only a page that actually renders counts; a 500 from a half-started
+        // or broken app must not be reported as Running.
+        if let Ok(resp) = http.get(&url).send().await {
+            let st = resp.status();
+            if st.is_success() || st.is_redirection() {
+                return Ok(());
+            }
+            if last_status != Some(st.as_u16()) {
+                last_status = Some(st.as_u16());
+                push_log(app, id, format!("GET / -> {st}"));
+            }
         }
         if tick % 5 == 4 {
             let probe = format!(
@@ -292,9 +302,10 @@ async fn wait_for_http(app: &AppHandle, id: &str, port: u16, cname: &str) -> Res
             }
         }
     }
-    Err(Error::Other(
-        "timed out waiting for the app to answer on its port".into(),
-    ))
+    Err(Error::Other(match last_status {
+        Some(code) => format!("app answers HTTP {code} instead of a page; see log"),
+        None => "timed out waiting for the app to answer on its port".into(),
+    }))
 }
 
 // ---- Models ---------------------------------------------------------------
