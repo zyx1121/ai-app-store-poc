@@ -63,12 +63,42 @@ function isValidBox(box: unknown): box is [number, number, number, number] {
 }
 
 /** Lenient parse: pull the first `{...}` block out of the reply and validate its shape. */
+/** Return the first complete JSON value (object or array) found in free text. */
+function extractJson(text: string): unknown {
+  const start = text.search(/[[{]/);
+  if (start === -1) throw new Error("Model did not return JSON.");
+  let depth = 0;
+  let inString = false;
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+    if (inString) {
+      if (ch === "\\") i++;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    else if (ch === "{" || ch === "[") depth++;
+    else if (ch === "}" || ch === "]") {
+      depth--;
+      if (depth === 0) return JSON.parse(text.slice(start, i + 1));
+    }
+  }
+  throw new Error("Model returned truncated JSON.");
+}
+
+/** Accept `{objects:[...]}`, `{detections:[...]}` or a bare array of `{label, box}`. */
 function parseDetections(text: string): Detection[] {
-  const match = text.match(/\{[\s\S]*\}/);
-  if (!match) throw new Error("Model did not return JSON.");
-  const parsed = JSON.parse(match[0]) as { objects?: Array<{ label?: unknown; box?: unknown }> };
-  const objects = Array.isArray(parsed.objects) ? parsed.objects : [];
-  return objects
+  const parsed = extractJson(text) as
+    | Array<{ label?: unknown; box?: unknown }>
+    | { objects?: unknown; detections?: unknown };
+  const list = Array.isArray(parsed)
+    ? parsed
+    : Array.isArray(parsed.objects)
+      ? parsed.objects
+      : Array.isArray(parsed.detections)
+        ? parsed.detections
+        : [];
+  return (list as Array<{ label?: unknown; box?: unknown }>)
     .filter(
       (o): o is { label: string; box: [number, number, number, number] } =>
         typeof o.label === "string" && isValidBox(o.box),
@@ -392,9 +422,9 @@ export function Vision() {
   }
 
   return (
-    <div className="flex h-full flex-col gap-3 p-6">
+    <div className="flex h-full flex-col gap-3 overflow-y-auto p-6">
       {!ready ? (
-        <Card>
+        <Card className="shrink-0">
           <CardHeader>
             <CardTitle>No vision model running</CardTitle>
             <CardDescription>
@@ -489,7 +519,7 @@ export function Vision() {
               </Alert>
             )}
 
-            <div ref={previewContainerRef} className="relative min-h-48 flex-1 overflow-hidden rounded-lg border border-border bg-muted">
+            <div ref={previewContainerRef} className="relative h-[420px] shrink-0 overflow-hidden rounded-lg border border-border bg-muted">
               {imageUrl ? (
                 <>
                   <img src={imageUrl} alt="Captured" className="size-full object-contain" onLoad={redrawOverlay} />
