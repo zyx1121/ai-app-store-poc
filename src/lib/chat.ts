@@ -70,5 +70,10 @@ export function createChatTransport(modelTag: string) {
       messages: trimToBudget(messages ?? []),
     }),
   });
-  return new DirectChatTransport({ agent, sendReasoning: true });
+  return new DirectChatTransport({
+    agent,
+    sendReasoning: true,
+    // Surface the real failure; the default swallows it as "An error occurred."
+    onError: (error) => (error instanceof Error ? error.message : String(error)),
+  });
 }
