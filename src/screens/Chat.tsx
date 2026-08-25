@@ -171,6 +171,7 @@ export function Chat({ initialInstanceId }: { initialInstanceId?: string }) {
         <Select
           value={selectedId ?? null}
           onValueChange={(v) => setSelectedId(v ?? undefined)}
+          items={Object.fromEntries(instances.map((i) => [i.id, i.display_name]))}
         >
           <SelectTrigger className="w-64">
             <SelectValue placeholder="Select a running model" />
