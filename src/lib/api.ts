@@ -9,6 +9,29 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 // Runtime (WSL2 distro + Docker + NVIDIA + Ollama)
 // ---------------------------------------------------------------------------
 
+export type Vendor = "nvidia" | "amd" | "intel" | "cpu";
+
+export type Gpu = {
+  name: string;
+  vendor: Vendor;
+  vram_mb: number | null;
+  /** integrated graphics (shares system RAM); a discrete card is preferred */
+  integrated: boolean;
+  driver: string | null;
+};
+
+export type Npu = { name: string; vendor: "intel" | "amd" | "qualcomm" | "unknown" };
+
+export type HardwareProfile = {
+  gpus: Gpu[];
+  npus: Npu[];
+  primary_gpu: Gpu | null;
+  /** vendor the runtime is built around; selects service implementations */
+  vendor: Vendor;
+  /** only NVIDIA can be handed to WSL2 containers; other vendors run natively on Windows */
+  wsl_gpu: boolean;
+};
+
 export type RuntimeStatus = {
   /** wsl.exe is present and WSL2 is functional */
   wsl_installed: boolean;
@@ -26,6 +49,8 @@ export type RuntimeStatus = {
   ready: boolean;
   /** a Windows reboot is required before continuing (WSL feature just enabled) */
   reboot_required: boolean;
+  hardware: HardwareProfile;
+  vendor: Vendor;
 };
 
 export type ProvisionEvent = {

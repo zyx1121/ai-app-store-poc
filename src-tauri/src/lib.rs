@@ -1,4 +1,5 @@
 mod error;
+mod hardware;
 mod hf;
 mod instances;
 mod runtime;

@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
 
 use crate::error::{Error, Result};
+use crate::hardware::{self, HardwareProfile, Vendor};
 use crate::state::AppState;
 use crate::wsl::{self, DISTRO};
 
@@ -24,6 +25,9 @@ pub struct RuntimeStatus {
     pub vram_mb: Option<u64>,
     pub ready: bool,
     pub reboot_required: bool,
+    /// GPUs and NPUs on the host and the vendor the runtime is built around.
+    pub hardware: HardwareProfile,
+    pub vendor: Vendor,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -46,6 +50,12 @@ fn emit(app: &AppHandle, step: &str, status: &'static str, message: impl Into<St
 /// Probe everything. Never fails: a missing piece is a `false`, not an error.
 pub async fn status() -> RuntimeStatus {
     let mut s = RuntimeStatus::default();
+    s.hardware = hardware::probe().await;
+    s.vendor = s.hardware.vendor;
+    if let Some(g) = &s.hardware.primary_gpu {
+        s.gpu_name = Some(g.name.clone());
+        s.vram_mb = g.vram_mb;
+    }
 
     match wsl::wsl(&["--status"]).await {
         Ok(o) if o.ok() => s.wsl_installed = true,
