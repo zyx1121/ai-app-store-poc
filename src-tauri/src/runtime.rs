@@ -12,6 +12,10 @@ use crate::wsl::{self, DISTRO};
 
 const PROVISION_SCRIPT: &str = include_str!("../provision.sh");
 const PROGRESS_EVENT: &str = "provision://progress";
+/// Set to `nvidia` / `amd` / `intel` / `cpu` to exercise another vendor's runtime
+/// path on this machine (per-vendor services, native Ollama, CPU builds). For
+/// testing only: the GPU itself does not change, so CUDA still works underneath.
+pub const VENDOR_OVERRIDE_ENV: &str = "AIAS_VENDOR";
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct RuntimeStatus {
@@ -29,6 +33,23 @@ pub struct RuntimeStatus {
     /// GPUs and NPUs on the host and the vendor the runtime is built around.
     pub hardware: HardwareProfile,
     pub vendor: Vendor,
+    /// `vendor` came from `AIAS_VENDOR`, not from the probe.
+    pub vendor_forced: bool,
+}
+
+/// The vendor named by `AIAS_VENDOR`, if it is set to a known value.
+fn forced_vendor() -> Option<Vendor> {
+    let v = std::env::var(VENDOR_OVERRIDE_ENV).ok()?;
+    match v.trim().to_ascii_lowercase().as_str() {
+        "nvidia" => Some(Vendor::Nvidia),
+        "amd" => Some(Vendor::Amd),
+        "intel" => Some(Vendor::Intel),
+        "cpu" => Some(Vendor::Cpu),
+        other => {
+            log::warn!("{VENDOR_OVERRIDE_ENV}={other:?} is not a vendor; ignoring");
+            None
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -50,8 +71,19 @@ fn emit(app: &AppHandle, step: &str, status: &'static str, message: impl Into<St
 
 /// Probe everything. Never fails: a missing piece is a `false`, not an error.
 pub async fn status() -> RuntimeStatus {
-    let mut s = RuntimeStatus::default();
-    s.hardware = hardware::probe().await;
+    let mut s = RuntimeStatus {
+        hardware: hardware::probe().await,
+        ..Default::default()
+    };
+    if let Some(v) = forced_vendor() {
+        log::warn!(
+            "{VENDOR_OVERRIDE_ENV}: treating this machine as {v:?} (probe said {:?})",
+            s.hardware.vendor
+        );
+        s.hardware.vendor = v;
+        s.hardware.wsl_gpu = v == Vendor::Nvidia;
+        s.vendor_forced = true;
+    }
     s.vendor = s.hardware.vendor;
     if let Some(g) = &s.hardware.primary_gpu {
         s.gpu_name = Some(g.name.clone());

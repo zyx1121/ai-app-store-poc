@@ -53,6 +53,8 @@ export type RuntimeStatus = {
   reboot_required: boolean;
   hardware: HardwareProfile;
   vendor: Vendor;
+  /** `vendor` was forced with the `AIAS_VENDOR` environment variable (testing another vendor's path) */
+  vendor_forced: boolean;
 };
 
 export type ProvisionEvent = {
