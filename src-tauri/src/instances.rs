@@ -206,7 +206,8 @@ async fn start_space(
         let image = if local_build {
             let app3 = app2.clone();
             let iid = inst_id.clone();
-            match build::build_space(&space, slug(&id).as_str(), vendor, move |l| {
+            let http = app2.state::<AppState>().http.clone();
+            match build::build_space(&http, &space, slug(&id).as_str(), vendor, move |l| {
                 push_log(&app3, &iid, l)
             })
             .await

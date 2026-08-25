@@ -78,8 +78,10 @@ The Hub builds Space images on NVIDIA tiers only. When a Space has no image, or
 the GPU is not NVIDIA, the store clones the Space into the distro, generates a
 Dockerfile for gradio / streamlit Spaces (slim Python, SDK pinned to
 `sdk_version`, requirements, `app_file` as entrypoint) or uses the Space's own
-Dockerfile, and builds `aias-local/<slug>`. Non-NVIDIA builds pin `torch` to the
-CPU wheel index. Requirements that only ship CUDA builds (flash-attn, xformers,
+Dockerfile, and builds `aias-local/<slug>`. Dependencies are resolved with
+`uv --exclude-newer <SDK release date + 7 days>` so an old Space gets the
+dependency set of its era (a 2023 gradio with today's starlette does not start).
+Non-NVIDIA builds pin `torch` to the CPU wheel index. Requirements that only ship CUDA builds (flash-attn, xformers,
 bitsandbytes, custom kernels) are refused up front with the reason instead of
 failing fifteen minutes in.
 
