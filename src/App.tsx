@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { MessageSquare, Mic, Play, Settings, Store } from "lucide-react";
+import { Camera, MessageSquare, Mic, Play, Settings, Store } from "lucide-react";
 import { runtimeStatus, type RuntimeStatus } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -8,8 +8,9 @@ import { Browse } from "@/screens/Browse";
 import { Running } from "@/screens/Running";
 import { Chat } from "@/screens/Chat";
 import { Audio } from "@/screens/Audio";
+import { Vision } from "@/screens/Vision";
 
-type Route = "browse" | "running" | "chat" | "audio" | "setup";
+type Route = "browse" | "running" | "chat" | "audio" | "vision" | "setup";
 
 function App() {
   const [status, setStatus] = useState<RuntimeStatus | null>(null);
@@ -39,6 +40,7 @@ function App() {
     { key: "running", label: "Running", icon: Play },
     { key: "chat", label: "Chat", icon: MessageSquare },
     { key: "audio", label: "Audio", icon: Mic },
+    { key: "vision", label: "Vision", icon: Camera },
     { key: "setup", label: "Setup", icon: Settings },
   ];
 
@@ -73,6 +75,7 @@ function App() {
               {activeScreen === "browse" && <Browse onLaunched={() => setRoute("running")} />}
               {activeScreen === "running" && <Running onOpenChat={openChat} />}
               {activeScreen === "audio" && <Audio />}
+              {activeScreen === "vision" && <Vision />}
             </div>
           )}
         </main>
