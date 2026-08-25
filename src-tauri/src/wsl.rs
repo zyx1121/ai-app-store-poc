@@ -52,10 +52,7 @@ fn base(program: &str) -> Command {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        c.creation_flags(CREATE_NO_WINDOW);
-    }
+    c.creation_flags(CREATE_NO_WINDOW);
     c
 }
 
