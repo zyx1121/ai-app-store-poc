@@ -98,7 +98,7 @@ fn string_or_number<'de, D: serde::Deserializer<'de>>(
     enum V {
         S(String),
         N(serde_json::Number),
-        Other(serde_json::Value),
+        Other(serde::de::IgnoredAny),
     }
     Ok(match Option::<V>::deserialize(d)? {
         Some(V::S(s)) => Some(s),
