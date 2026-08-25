@@ -4,9 +4,11 @@
 //! (ROCm or Vulkan backend) and the store keeps a `ollama serve` child alive.
 //! Either way the API is `http://localhost:11434`, which both sides share.
 
+use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
 
+use tokio::io::AsyncWriteExt;
 use tokio::process::{Child, Command};
 
 use crate::error::{Error, Result};
@@ -16,9 +18,27 @@ use crate::wsl;
 
 pub const PORT: u16 = 11434;
 
-fn native_exe() -> Option<std::path::PathBuf> {
+/// Standalone CLI zips (Ollama's documented path for embedding it in another
+/// application). The base zip carries the CPU and CUDA backends; AMD adds ROCm.
+/// The interactive installer has no working silent mode (ollama/ollama#7969).
+const STANDALONE_BASE: &str = "https://ollama.com/download/";
+const STANDALONE_ZIP: &str = "ollama-windows-amd64.zip";
+const STANDALONE_ROCM_ZIP: &str = "ollama-windows-amd64-rocm.zip";
+
+/// Where the store keeps its own copy of Ollama for Windows.
+fn managed_dir() -> Option<PathBuf> {
+    std::env::var_os("LOCALAPPDATA").map(|l| PathBuf::from(l).join("ai-app-store").join("ollama"))
+}
+
+fn native_exe() -> Option<PathBuf> {
     if let Ok(local) = std::env::var("LOCALAPPDATA") {
-        let p = std::path::PathBuf::from(local).join("Programs\\Ollama\\ollama.exe");
+        // A copy the user installed with OllamaSetup.exe wins; it keeps itself updated.
+        let p = PathBuf::from(local).join("Programs\\Ollama\\ollama.exe");
+        if p.exists() {
+            return Some(p);
+        }
+    }
+    if let Some(p) = managed_dir().map(|d| d.join("ollama.exe")) {
         if p.exists() {
             return Some(p);
         }
@@ -29,6 +49,77 @@ fn native_exe() -> Option<std::path::PathBuf> {
             .map(|d| d.join("ollama.exe"))
             .find(|p| p.exists())
     })
+}
+
+/// Stream a download to `dest`, reporting every 32 MB.
+async fn download(
+    http: &reqwest::Client,
+    url: &str,
+    dest: &std::path::Path,
+    log: &mut impl FnMut(String),
+) -> Result<()> {
+    let name = dest
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let mut resp = http.get(url).send().await?.error_for_status()?;
+    let total = resp.content_length();
+    let part = dest.with_extension("part");
+    let mut file = tokio::fs::File::create(&part).await?;
+    let mut done: u64 = 0;
+    let mut next_report: u64 = 32 << 20;
+    while let Some(chunk) = resp.chunk().await? {
+        file.write_all(&chunk).await?;
+        done += chunk.len() as u64;
+        if done >= next_report {
+            next_report += 32 << 20;
+            log(match total {
+                Some(t) => format!("{name}: {} / {} MB", done >> 20, t >> 20),
+                None => format!("{name}: {} MB", done >> 20),
+            });
+        }
+    }
+    file.flush().await?;
+    drop(file);
+    tokio::fs::rename(&part, dest).await?;
+    Ok(())
+}
+
+/// Fetch the standalone zips for this vendor into the managed directory and
+/// unpack them with the system `tar.exe` (bsdtar reads zip). Returns the exe.
+async fn install_standalone(
+    http: &reqwest::Client,
+    vendor: Vendor,
+    log: &mut impl FnMut(String),
+) -> Result<PathBuf> {
+    let dir = managed_dir().ok_or_else(|| Error::Other("LOCALAPPDATA is not set".into()))?;
+    tokio::fs::create_dir_all(&dir).await?;
+    let mut zips = vec![STANDALONE_ZIP];
+    if vendor == Vendor::Amd {
+        zips.push(STANDALONE_ROCM_ZIP);
+    }
+    for zip in zips {
+        let url = format!("{STANDALONE_BASE}{zip}");
+        let dest = dir.join(zip);
+        log(format!("downloading {url}"));
+        download(http, &url, &dest, log).await?;
+        log(format!("unpacking {zip}"));
+        wsl::run(
+            "tar.exe",
+            &["-xf", &dest.to_string_lossy(), "-C", &dir.to_string_lossy()],
+        )
+        .await?
+        .require("tar -xf")?;
+        let _ = tokio::fs::remove_file(&dest).await;
+    }
+    let exe = dir.join("ollama.exe");
+    if !exe.exists() {
+        return Err(Error::Other(format!(
+            "{zip} did not contain ollama.exe",
+            zip = STANDALONE_ZIP
+        )));
+    }
+    Ok(exe)
 }
 
 /// Candidate base URLs. WSL2's localhost forwarding listens on `[::1]` on the
@@ -108,40 +199,26 @@ pub fn spawn(state: &AppState, args: &[&str]) -> Result<Child> {
     }
 }
 
-/// Non-NVIDIA machines: install Ollama for Windows if missing and keep a
-/// headless `ollama serve` running with CORS open. Idempotent.
+/// Non-NVIDIA machines: install Ollama for Windows if missing (standalone zip
+/// into the store's own directory) and keep a headless `ollama serve` running
+/// with CORS open. Idempotent.
 pub async fn ensure_native(state: &AppState, mut log: impl FnMut(String)) -> Result<()> {
-    if state.vendor() == Vendor::Nvidia {
+    let vendor = state.vendor();
+    if vendor == Vendor::Nvidia {
         return Ok(());
     }
-    if native_exe().is_none() {
-        log("installing Ollama for Windows (winget)".into());
-        let out = wsl::run(
-            "winget",
-            &[
-                "install",
-                "-e",
-                "--id",
-                "Ollama.Ollama",
-                "--silent",
-                "--accept-source-agreements",
-                "--accept-package-agreements",
-                "--disable-interactivity",
-            ],
-        )
-        .await?;
-        if native_exe().is_none() {
-            return Err(Error::Other(format!(
-                "Ollama install did not produce ollama.exe: {}",
-                out.stderr.trim().chars().take(300).collect::<String>()
-            )));
+    let exe = match native_exe() {
+        Some(exe) => exe,
+        None => {
+            log("installing Ollama for Windows (standalone zip)".into());
+            let exe = install_standalone(&state.http, vendor, &mut log).await?;
+            log(format!("Ollama installed at {}", exe.display()));
+            exe
         }
-        log("Ollama installed".into());
-    }
+    };
     if is_up().await {
         return Ok(());
     }
-    let exe = native_exe().expect("checked above");
     log(format!("starting {} serve", exe.display()));
     let mut cmd = Command::new(&exe);
     cmd.arg("serve")

@@ -18,10 +18,10 @@ import { Button } from "@/components/ui/button";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
-import { Cpu, CircleCheck, CircleX, Microchip, TriangleAlert } from "lucide-react";
+import { Cpu, CircleCheck, CircleX, Microchip, Minus, TriangleAlert } from "lucide-react";
 import { cn } from "@/lib/utils";
 
-type Row = { label: string; ok: boolean; detail?: string };
+type Row = { label: string; ok: boolean; detail?: string; /** not needed on this vendor */ na?: boolean };
 
 const VENDOR_LABEL: Record<Vendor, string> = {
   nvidia: "NVIDIA",
@@ -53,12 +53,21 @@ function gpuVram(gpu: Gpu): string {
   return gpu.vram_mb ? `${(gpu.vram_mb / 1024).toFixed(1)} GB` : "-";
 }
 
-function HardwareCard({ hardware, vendor }: { hardware: HardwareProfile; vendor: Vendor }) {
+function HardwareCard({
+  hardware,
+  vendor,
+  forced,
+}: {
+  hardware: HardwareProfile;
+  vendor: Vendor;
+  forced: boolean;
+}) {
   return (
     <div className="flex flex-col gap-3 rounded-xl border border-border p-3">
       <div className="flex items-center gap-2">
         <Cpu className="size-4 shrink-0 text-foreground" />
         <span className="flex-1 text-sm font-medium">Hardware</span>
+        {forced && <Badge variant="outline">forced via AIAS_VENDOR</Badge>}
         <Badge>{VENDOR_LABEL[vendor]}</Badge>
       </div>
 
@@ -231,13 +240,20 @@ function rows(status: RuntimeStatus): Row[] {
     },
     { label: "Docker", ok: status.docker_ok },
     {
-      label: "NVIDIA GPU",
+      label: "GPU in WSL2",
       ok: status.gpu_ok,
-      detail: status.gpu_name
-        ? `${status.gpu_name}${status.vram_mb ? ` (${(status.vram_mb / 1024).toFixed(1)} GB VRAM)` : ""}`
-        : undefined,
+      na: status.vendor !== "nvidia",
+      detail:
+        status.vendor !== "nvidia"
+          ? "not used: LLMs run natively on Windows for this GPU"
+          : status.gpu_name
+            ? `${status.gpu_name}${status.vram_mb ? ` (${(status.vram_mb / 1024).toFixed(1)} GB VRAM)` : ""}`
+            : undefined,
     },
-    { label: "Ollama", ok: status.ollama_ok },
+    {
+      label: status.vendor === "nvidia" ? "Ollama (WSL2)" : "Ollama (Windows)",
+      ok: status.ollama_ok,
+    },
   ];
 }
 
@@ -314,7 +330,9 @@ export function Setup({
         </p>
       </div>
 
-      {status && <HardwareCard hardware={status.hardware} vendor={status.vendor} />}
+      {status && (
+        <HardwareCard hardware={status.hardware} vendor={status.vendor} forced={status.vendor_forced} />
+      )}
 
       <UpdateCard />
 
@@ -324,6 +342,8 @@ export function Setup({
             <div key={row.label} className="flex items-center gap-2 py-1 text-sm">
               {row.ok ? (
                 <CircleCheck className="size-4 shrink-0 text-foreground" />
+              ) : row.na ? (
+                <Minus className="size-4 shrink-0 text-muted-foreground" />
               ) : (
                 <CircleX className="size-4 shrink-0 text-destructive" />
               )}
