@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Camera, MessageSquare, Mic, Play, Settings, Store } from "lucide-react";
+import { Camera, MessageSquare, Mic, Palette, Play, Settings, Store } from "lucide-react";
 import { runtimeStatus, type RuntimeStatus } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -9,8 +9,9 @@ import { Running } from "@/screens/Running";
 import { Chat } from "@/screens/Chat";
 import { Audio } from "@/screens/Audio";
 import { Vision } from "@/screens/Vision";
+import { Canvas } from "@/screens/Canvas";
 
-type Route = "browse" | "running" | "chat" | "audio" | "vision" | "setup";
+type Route = "browse" | "running" | "chat" | "audio" | "vision" | "canvas" | "setup";
 
 function App() {
   const [status, setStatus] = useState<RuntimeStatus | null>(null);
@@ -41,6 +42,7 @@ function App() {
     { key: "chat", label: "Chat", icon: MessageSquare },
     { key: "audio", label: "Audio", icon: Mic },
     { key: "vision", label: "Vision", icon: Camera },
+    { key: "canvas", label: "Canvas", icon: Palette },
     { key: "setup", label: "Setup", icon: Settings },
   ];
 
@@ -76,6 +78,7 @@ function App() {
               {activeScreen === "running" && <Running onOpenChat={openChat} />}
               {activeScreen === "audio" && <Audio />}
               {activeScreen === "vision" && <Vision />}
+              {activeScreen === "canvas" && <Canvas />}
             </div>
           )}
         </main>

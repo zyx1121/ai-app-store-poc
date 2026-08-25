@@ -19,6 +19,7 @@ const LOG_TAIL: usize = 20;
 #[serde(rename_all = "lowercase")]
 pub enum ServiceId {
     Speaches,
+    Comfyui,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -58,6 +59,8 @@ struct ServiceSpec {
     volumes: &'static [(&'static str, &'static str)],
     /// path that answers 2xx once the service is usable
     health_path: &'static str,
+    /// downloadable model files: (name shown to the user, URL, path inside the container)
+    models: &'static [(&'static str, &'static str, &'static str)],
 }
 
 const SPEACHES: ServiceSpec = ServiceSpec {
@@ -72,12 +75,94 @@ const SPEACHES: ServiceSpec = ServiceSpec {
     env: &[("ALLOW_ORIGINS", r#"["*"]"#), ("ENABLE_UI", "false")],
     volumes: &[("aias-speaches-cache", "/home/ubuntu/.cache/huggingface/hub")],
     health_path: "/v1/models",
+    models: &[],
+};
+
+const COMFYUI: ServiceSpec = ServiceSpec {
+    id: ServiceId::Comfyui,
+    display_name: "ComfyUI (image generation)",
+    image: "yanwk/comfyui-boot:cu126-slim",
+    container: "aias-svc-comfyui",
+    host_port: 8188,
+    container_port: 8188,
+    gpu: true,
+    // The boot image reads its flags from CLI_ARGS; --lowvram keeps a 10 GB card usable next to an LLM.
+    env: &[("CLI_ARGS", "--enable-cors-header --lowvram")],
+    // The image installs ComfyUI under /root on first start; one volume keeps app, models and outputs.
+    volumes: &[("aias-comfyui-root", "/root")],
+    health_path: "/system_stats",
+    models: &[(
+        "sd-turbo",
+        "https://huggingface.co/stabilityai/sd-turbo/resolve/main/sd_turbo.safetensors",
+        "/root/ComfyUI/models/checkpoints/sd_turbo.safetensors",
+    )],
 };
 
 fn spec(id: ServiceId) -> &'static ServiceSpec {
     match id {
         ServiceId::Speaches => &SPEACHES,
+        ServiceId::Comfyui => &COMFYUI,
     }
+}
+
+/// Files the service needs that are not part of its image, with whether they are present.
+#[derive(Debug, Clone, Serialize)]
+pub struct ServiceModel {
+    pub name: String,
+    pub path: String,
+    pub installed: bool,
+}
+
+pub async fn models(id: ServiceId) -> Result<Vec<ServiceModel>> {
+    let s = spec(id);
+    let mut out = Vec::new();
+    for (name, _url, path) in s.models {
+        let probe = format!("docker exec {} test -s '{}' && echo YES", s.container, path);
+        let installed = wsl::sh(&probe)
+            .await
+            .map(|o| o.stdout.contains("YES"))
+            .unwrap_or(false);
+        out.push(ServiceModel {
+            name: name.to_string(),
+            path: path.to_string(),
+            installed,
+        });
+    }
+    Ok(out)
+}
+
+/// Download one of the service's model files into the running container,
+/// streaming progress into the service log. Blocks until done.
+pub async fn install_model(app: AppHandle, id: ServiceId, name: String) -> Result<ServiceModel> {
+    let s = spec(id);
+    let Some((_, url, path)) = s.models.iter().find(|(n, _, _)| *n == name) else {
+        return Err(Error::Other(format!(
+            "`{name}` is not a known model for {id:?}"
+        )));
+    };
+    push_log(&app, id, format!("downloading {name}"));
+    let cmd = format!(
+        "docker exec {c} sh -c 'mkdir -p \"$(dirname {path})\" && curl -L --fail --progress-bar -o {path}.part {url} 2>&1 && mv {path}.part {path}' 2>&1",
+        c = s.container
+    );
+    let child = wsl::spawn_sh(&cmd)?;
+    let mut last = String::new();
+    let code = wsl::stream_lines(child, |l| {
+        if l != last {
+            last = l.clone();
+            push_log(&app, id, l);
+        }
+    })
+    .await?;
+    if code != 0 {
+        return Err(Error::Other(format!("download failed ({code}); see log")));
+    }
+    push_log(&app, id, format!("{name} installed"));
+    Ok(ServiceModel {
+        name,
+        path: path.to_string(),
+        installed: true,
+    })
 }
 
 fn base_status(s: &ServiceSpec) -> ServiceStatus {
