@@ -202,7 +202,9 @@ pub async fn provision(app: &AppHandle, state: &AppState) -> Result<RuntimeStatu
         "start",
         "Installing Docker, NVIDIA toolkit, Ollama inside the distro",
     );
-    let child = wsl::spawn_script(PROVISION_SCRIPT).await?;
+    // A Windows checkout may have turned the script into CRLF; bash rejects that.
+    let script = PROVISION_SCRIPT.replace("\r\n", "\n");
+    let child = wsl::spawn_script(&script).await?;
     let code = wsl::stream_lines(child, |l| emit(app, "provision", "log", l)).await?;
     if code != 0 {
         emit(
