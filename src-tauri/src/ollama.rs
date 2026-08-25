@@ -31,22 +31,35 @@ fn native_exe() -> Option<std::path::PathBuf> {
     })
 }
 
-/// Does anything answer on the Ollama port (from the Windows side, which also
-/// sees WSL-published ports)?
-pub async fn is_up() -> bool {
-    let http = match reqwest::Client::builder()
+/// Candidate base URLs. WSL2's localhost forwarding listens on `[::1]` on the
+/// Windows side while a native `ollama serve` binds `127.0.0.1`; try both.
+pub const BASES: [&str; 3] = [
+    "http://localhost:11434",
+    "http://[::1]:11434",
+    "http://127.0.0.1:11434",
+];
+
+/// The first base URL that answers, if any.
+pub async fn reachable_base() -> Option<&'static str> {
+    let http = reqwest::Client::builder()
         .no_proxy()
         .timeout(Duration::from_secs(3))
         .build()
-    {
-        Ok(c) => c,
-        Err(_) => return false,
-    };
-    http.get(format!("http://127.0.0.1:{PORT}/api/version"))
-        .send()
-        .await
-        .map(|r| r.status().is_success())
-        .unwrap_or(false)
+        .ok()?;
+    for base in BASES {
+        if let Ok(r) = http.get(format!("{base}/api/version")).send().await {
+            if r.status().is_success() {
+                return Some(base);
+            }
+        }
+    }
+    None
+}
+
+/// Does anything answer on the Ollama port (from the Windows side, which also
+/// sees WSL-published ports)?
+pub async fn is_up() -> bool {
+    reachable_base().await.is_some()
 }
 
 fn native_env(cmd: &mut Command) {

@@ -448,7 +448,10 @@ async fn run_model(app: &AppHandle, id: &str, tag: &str) -> Result<()> {
         .no_proxy()
         .timeout(Duration::from_secs(600))
         .build()?;
-    http.post(format!("http://127.0.0.1:{OLLAMA_PORT}/api/generate"))
+    let base = ollama::reachable_base()
+        .await
+        .ok_or_else(|| Error::NotReady("Ollama is not answering".into()))?;
+    http.post(format!("{base}/api/generate"))
         .json(&serde_json::json!({ "model": tag, "keep_alive": "30m" }))
         .send()
         .await?
