@@ -1,13 +1,13 @@
-import { useEffect, useRef, useState, type KeyboardEvent } from "react";
-import { Send, Square } from "lucide-react";
-import {
-  listInstances,
-  onInstanceUpdate,
-  OLLAMA_BASE_URL,
-  type Instance,
-} from "@/lib/api";
+import { useEffect, useMemo, useState } from "react";
+import { useChat } from "@ai-sdk/react";
+import type { UIMessage } from "ai";
+import { Eraser, MessageSquare } from "lucide-react";
+
+import { listInstances, onInstanceUpdate, type Instance } from "@/lib/api";
+import { CONTEXT_TOKENS, createChatTransport, estimateConversationTokens } from "@/lib/chat";
 import { Button } from "@/components/ui/button";
-import { Textarea } from "@/components/ui/textarea";
+import { Badge } from "@/components/ui/badge";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import {
   Select,
   SelectContent,
@@ -15,37 +15,161 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { ScrollArea } from "@/components/ui/scroll-area";
-import { cn } from "@/lib/utils";
-
-type ChatMessage = { role: "user" | "assistant"; content: string };
+import {
+  Conversation,
+  ConversationContent,
+  ConversationEmptyState,
+  ConversationScrollButton,
+} from "@/components/ai-elements/conversation";
+import { Message, MessageContent, MessageResponse } from "@/components/ai-elements/message";
+import {
+  PromptInput,
+  PromptInputBody,
+  PromptInputFooter,
+  type PromptInputMessage,
+  PromptInputSubmit,
+  PromptInputTextarea,
+  PromptInputTools,
+} from "@/components/ai-elements/prompt-input";
+import { Reasoning, ReasoningContent, ReasoningTrigger } from "@/components/ai-elements/reasoning";
 
 function isRunningModel(instance: Instance): boolean {
   return instance.kind === "model" && instance.status === "running";
 }
 
-/** Strip `<think>...</think>` reasoning blocks (including an unclosed trailing one) from display. */
-function stripThink(text: string): string {
-  const closed = text.replace(/<think>[\s\S]*?<\/think>/g, "");
-  const openIdx = closed.indexOf("<think>");
-  return openIdx === -1 ? closed : closed.slice(0, openIdx);
+function formatTokens(n: number): string {
+  return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n);
+}
+
+/** One message: reasoning (collapsed, consolidated) then the text parts as Markdown. */
+function MessageParts({
+  message,
+  isLastMessage,
+  isStreaming,
+}: {
+  message: UIMessage;
+  isLastMessage: boolean;
+  isStreaming: boolean;
+}) {
+  const reasoningParts = message.parts.filter((p) => p.type === "reasoning");
+  const reasoningText = reasoningParts.map((p) => p.text).join("\n\n");
+  const lastPart = message.parts.at(-1);
+  const reasoningStreaming = isLastMessage && isStreaming && lastPart?.type === "reasoning";
+
+  return (
+    <>
+      {reasoningParts.length > 0 && (
+        <Reasoning className="w-full" isStreaming={reasoningStreaming}>
+          <ReasoningTrigger />
+          <ReasoningContent>{reasoningText}</ReasoningContent>
+        </Reasoning>
+      )}
+      {message.parts.map((part, i) =>
+        part.type === "text" ? (
+          <MessageResponse key={`${message.id}-${i}`}>{part.text}</MessageResponse>
+        ) : null,
+      )}
+    </>
+  );
+}
+
+/** A conversation bound to one running model. Remounted (via `key`) when the model changes. */
+function ChatSession({ instance }: { instance: Instance }) {
+  const modelTag = instance.model_tag ?? "";
+  const transport = useMemo(() => createChatTransport(modelTag), [modelTag]);
+  const { messages, sendMessage, status, stop, setMessages, error, clearError } = useChat({
+    id: instance.id,
+    transport,
+  });
+
+  const isStreaming = status === "streaming";
+  const busy = status === "submitted" || status === "streaming";
+  const usedTokens = useMemo(
+    () =>
+      estimateConversationTokens(
+        messages.flatMap((m) => m.parts.map((p) => ("text" in p ? String(p.text) : ""))),
+      ),
+    [messages],
+  );
+
+  function handleSubmit(message: PromptInputMessage) {
+    const text = message.text.trim();
+    if (!text || busy) return;
+    void sendMessage({ text });
+  }
+
+  function clear() {
+    stop();
+    clearError();
+    setMessages([]);
+  }
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col gap-3">
+      <div className="flex items-center gap-2 text-sm text-muted-foreground">
+        <Badge variant="outline">{instance.display_name}</Badge>
+        <span>
+          context {formatTokens(usedTokens)} / {formatTokens(CONTEXT_TOKENS)}
+        </span>
+        <span className="flex-1" />
+        <Button variant="ghost" size="sm" onClick={clear} disabled={messages.length === 0 && !error}>
+          <Eraser className="mr-1 size-4" /> Clear
+        </Button>
+      </div>
+
+      <Conversation className="min-h-0 flex-1 rounded-xl border border-border">
+        <ConversationContent>
+          {messages.length === 0 ? (
+            <ConversationEmptyState
+              icon={<MessageSquare className="size-10" />}
+              title="Start a conversation"
+              description={`Messages go straight to ${instance.display_name} on this machine.`}
+            />
+          ) : (
+            messages.map((message, index) => (
+              <Message from={message.role} key={message.id}>
+                <MessageContent>
+                  <MessageParts
+                    message={message}
+                    isLastMessage={index === messages.length - 1}
+                    isStreaming={isStreaming}
+                  />
+                </MessageContent>
+              </Message>
+            ))
+          )}
+        </ConversationContent>
+        <ConversationScrollButton />
+      </Conversation>
+
+      {error && (
+        <Alert variant="destructive">
+          <AlertDescription>{error.message}</AlertDescription>
+        </Alert>
+      )}
+
+      <PromptInput onSubmit={handleSubmit}>
+        <PromptInputBody>
+          <PromptInputTextarea placeholder="Message the model. Enter sends, Shift+Enter for a new line." />
+        </PromptInputBody>
+        <PromptInputFooter>
+          <PromptInputTools />
+          <PromptInputSubmit status={status} onStop={stop} />
+        </PromptInputFooter>
+      </PromptInput>
+    </div>
+  );
 }
 
 export function Chat({ initialInstanceId }: { initialInstanceId?: string }) {
   const [instances, setInstances] = useState<Instance[]>([]);
   const [selectedId, setSelectedId] = useState<string | undefined>(initialInstanceId);
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [input, setInput] = useState("");
-  const [sending, setSending] = useState(false);
-  const abortRef = useRef<AbortController | null>(null);
-  const bottomRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     let cancelled = false;
     listInstances().then((res) => {
       if (!cancelled) setInstances(res.filter(isRunningModel));
     });
-
     let unlisten: (() => void) | undefined;
     onInstanceUpdate((instance) => {
       if (instance.kind !== "model") return;
@@ -57,7 +181,6 @@ export function Chat({ initialInstanceId }: { initialInstanceId?: string }) {
       if (cancelled) fn();
       else unlisten = fn;
     });
-
     return () => {
       cancelled = true;
       unlisten?.();
@@ -69,111 +192,17 @@ export function Chat({ initialInstanceId }: { initialInstanceId?: string }) {
     setSelectedId(instances[0]?.id);
   }, [instances, selectedId]);
 
-  useEffect(() => {
-    bottomRef.current?.scrollIntoView({ block: "end" });
-  }, [messages]);
-
-  async function send() {
-    const instance = instances.find((i) => i.id === selectedId);
-    const text = input.trim();
-    if (!instance || !instance.model_tag || !text || sending) return;
-
-    const history = [...messages, { role: "user" as const, content: text }];
-    setMessages([...history, { role: "assistant", content: "" }]);
-    setInput("");
-    setSending(true);
-
-    const assistantIndex = history.length;
-    const controller = new AbortController();
-    abortRef.current = controller;
-    let raw = "";
-
-    try {
-      const res = await fetch(`${OLLAMA_BASE_URL}/chat/completions`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          model: instance.model_tag,
-          messages: history.map(({ role, content }) => ({ role, content })),
-          stream: true,
-        }),
-        signal: controller.signal,
-      });
-
-      if (!res.ok || !res.body) throw new Error(`request failed (${res.status})`);
-
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop() ?? "";
-
-        for (const line of lines) {
-          const trimmed = line.trim();
-          if (!trimmed.startsWith("data:")) continue;
-          const data = trimmed.slice("data:".length).trim();
-          if (data === "" || data === "[DONE]") continue;
-
-          try {
-            const parsed = JSON.parse(data);
-            const delta = parsed.choices?.[0]?.delta?.content;
-            if (typeof delta === "string") {
-              raw += delta;
-              const display = stripThink(raw);
-              setMessages((prev) => {
-                const next = prev.slice();
-                next[assistantIndex] = { role: "assistant", content: display };
-                return next;
-              });
-            }
-          } catch {
-            // ignore malformed SSE chunk
-          }
-        }
-      }
-    } catch (e) {
-      if ((e as Error).name !== "AbortError") {
-        setMessages((prev) => {
-          const next = prev.slice();
-          const prior = next[assistantIndex]?.content ?? "";
-          next[assistantIndex] = {
-            role: "assistant",
-            content: `${prior}\n[error: ${String(e)}]`,
-          };
-          return next;
-        });
-      }
-    } finally {
-      setSending(false);
-      abortRef.current = null;
-    }
-  }
-
-  function stop() {
-    abortRef.current?.abort();
-  }
-
-  function handleKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
-    if (e.key === "Enter" && !e.shiftKey) {
-      e.preventDefault();
-      void send();
-    }
-  }
+  const selected = instances.find((i) => i.id === selectedId);
 
   return (
-    <div className="flex h-full flex-col gap-4 p-6">
+    <div className="flex h-full flex-col gap-3 p-6">
       <div className="flex items-center gap-2">
         <Select
           value={selectedId ?? null}
           onValueChange={(v) => setSelectedId(v ?? undefined)}
           items={Object.fromEntries(instances.map((i) => [i.id, i.display_name]))}
         >
-          <SelectTrigger className="w-64">
+          <SelectTrigger className="w-72">
             <SelectValue placeholder="Select a running model" />
           </SelectTrigger>
           <SelectContent>
@@ -185,54 +214,10 @@ export function Chat({ initialInstanceId }: { initialInstanceId?: string }) {
           </SelectContent>
         </Select>
         {instances.length === 0 && (
-          <p className="text-sm text-muted-foreground">
-            No running models. Launch one from Browse.
-          </p>
+          <p className="text-sm text-muted-foreground">No running models. Launch one from Browse.</p>
         )}
       </div>
-
-      <ScrollArea className="flex-1 rounded-xl border border-border">
-        <div className="flex flex-col gap-3 p-4">
-          {messages.map((message, i) => (
-            <div
-              key={i}
-              className={cn("flex", message.role === "user" ? "justify-end" : "justify-start")}
-            >
-              <div
-                className={cn(
-                  "max-w-[75%] whitespace-pre-wrap rounded-xl px-3 py-2 text-sm",
-                  message.role === "user"
-                    ? "bg-primary text-primary-foreground"
-                    : "bg-muted text-foreground",
-                )}
-              >
-                {message.content}
-              </div>
-            </div>
-          ))}
-          <div ref={bottomRef} />
-        </div>
-      </ScrollArea>
-
-      <div className="flex items-end gap-2">
-        <Textarea
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={handleKeyDown}
-          placeholder="Message the model..."
-          disabled={!selectedId}
-          className="flex-1"
-        />
-        {sending ? (
-          <Button variant="outline" onClick={stop}>
-            <Square /> Stop
-          </Button>
-        ) : (
-          <Button onClick={() => void send()} disabled={!selectedId || !input.trim()}>
-            <Send /> Send
-          </Button>
-        )}
-      </div>
+      {selected && <ChatSession key={selected.id} instance={selected} />}
     </div>
   );
 }
