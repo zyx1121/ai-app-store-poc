@@ -110,11 +110,12 @@ pub fn dockerfile_for(
     let index = torch_index(vendor);
     Some(format!(
         r#"FROM python:{py}-slim
-ENV PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1 GRADIO_SERVER_NAME=0.0.0.0 GRADIO_SERVER_PORT={port} HF_HOME=/home/user/.cache/huggingface
+ENV PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1 GRADIO_SERVER_NAME=0.0.0.0 GRADIO_SERVER_PORT={port} \
+    GRADIO_ALLOW_FLAGGING=never GRADIO_FLAGGING_MODE=never HF_HOME=/home/user/.cache/huggingface
 RUN apt-get update && apt-get install -y --no-install-recommends git ffmpeg libgl1 libglib2.0-0 && rm -rf /var/lib/apt/lists/* \
- && useradd -m -u 1000 user
+ && useradd -m -u 1000 user && mkdir -p /home/user/app && chown -R user:user /home/user
 WORKDIR /home/user/app
-COPY --chown=user . .
+COPY --chown=user:user . .
 RUN pip install --upgrade pip && pip install {index} "{sdk_pkg}" \
  && if [ -f requirements.txt ]; then pip install {index} -r requirements.txt; fi \
  && if [ -f packages.txt ]; then echo "packages.txt present: system packages are not installed by the local builder" >&2; fi
