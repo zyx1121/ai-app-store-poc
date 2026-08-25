@@ -350,7 +350,7 @@ export function Vision() {
 
     const rootStyle = getComputedStyle(document.documentElement);
     const primary = rootStyle.getPropertyValue("--primary").trim() || "red";
-    const foreground = rootStyle.getPropertyValue("--foreground").trim() || "black";
+    const foreground = rootStyle.getPropertyValue("--primary-foreground").trim() || "white";
 
     ctx.lineWidth = 2;
     ctx.font = "12px sans-serif";
