@@ -313,11 +313,28 @@ async fn wait_for_http(app: &AppHandle, id: &str, port: u16, cname: &str) -> Res
 pub async fn launch_model(app: AppHandle, repo: String, quant: String) -> Result<Instance> {
     let state = app.state::<AppState>();
     require_ready(&state)?;
-    hf::validate_repo(&repo)?;
-    if quant.is_empty() || !quant.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
-        return Err(Error::Other(format!("`{quant}` is not a quant tag")));
+    if quant.is_empty()
+        || !quant
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+    {
+        return Err(Error::Other(format!("`{quant}` is not a model tag")));
     }
-    let tag = format!("hf.co/{repo}:{quant}");
+    // `owner/name` is a Hugging Face GGUF repo; a bare name is an Ollama
+    // library model (e.g. `qwen2.5vl` + `7b`), which is how vision models ship.
+    let tag = if repo.contains('/') {
+        hf::validate_repo(&repo)?;
+        format!("hf.co/{repo}:{quant}")
+    } else {
+        if repo.is_empty()
+            || !repo
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+        {
+            return Err(Error::Other(format!("`{repo}` is not a model name")));
+        }
+        format!("{repo}:{quant}")
+    };
     let inst_id = format!("model-{}", slug(&format!("{repo}-{quant}")));
     if let Some(existing) = get(&state, &inst_id) {
         if matches!(

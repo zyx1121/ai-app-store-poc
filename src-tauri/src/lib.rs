@@ -2,6 +2,7 @@ mod error;
 mod hf;
 mod instances;
 mod runtime;
+mod services;
 mod state;
 mod wsl;
 
@@ -78,6 +79,27 @@ async fn remove_instance(app: AppHandle, id: String) -> CmdResult<()> {
 }
 
 #[tauri::command]
+async fn service_status(
+    app: AppHandle,
+    id: services::ServiceId,
+) -> CmdResult<services::ServiceStatus> {
+    cmd(services::status(&app, id).await)
+}
+
+#[tauri::command]
+async fn start_service(
+    app: AppHandle,
+    id: services::ServiceId,
+) -> CmdResult<services::ServiceStatus> {
+    cmd(services::start(app, id).await)
+}
+
+#[tauri::command]
+async fn stop_service(app: AppHandle, id: services::ServiceId) -> CmdResult<()> {
+    cmd(services::stop(app, id).await)
+}
+
+#[tauri::command]
 fn open_url(app: AppHandle, url: String) -> CmdResult<()> {
     if !(url.starts_with("http://") || url.starts_with("https://")) {
         return Err("only http(s) URLs can be opened".into());
@@ -130,6 +152,9 @@ pub fn run() {
             list_instances,
             stop_instance,
             remove_instance,
+            service_status,
+            start_service,
+            stop_service,
             open_url,
         ])
         .run(tauri::generate_context!())

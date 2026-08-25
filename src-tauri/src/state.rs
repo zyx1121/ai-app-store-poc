@@ -1,10 +1,11 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Mutex;
 
 use tokio::process::Child;
 
 use crate::instances::Instance;
 use crate::runtime::RuntimeStatus;
+use crate::services::{ServiceId, ServiceStatus};
 
 /// Process-wide state shared by all commands. Everything here is cheap to lock;
 /// long work happens in spawned tasks that re-lock briefly to publish results.
@@ -14,6 +15,7 @@ pub struct AppState {
     pub instances: Mutex<BTreeMap<String, Instance>>,
     pub keepalive: Mutex<Option<Child>>,
     pub discovered: Mutex<bool>,
+    pub services: Mutex<HashMap<ServiceId, ServiceStatus>>,
 }
 
 impl Default for AppState {
@@ -29,6 +31,7 @@ impl Default for AppState {
             instances: Mutex::new(BTreeMap::new()),
             keepalive: Mutex::new(None),
             discovered: Mutex::new(false),
+            services: Mutex::new(HashMap::new()),
         }
     }
 }
