@@ -65,12 +65,27 @@ the UI keys off it; the four base UIs only ever talk to `localhost` APIs.
 | LLM | Ollama inside WSL2 (CUDA) | Ollama for Windows, started headless by the store (ROCm on supported Radeon, Vulkan otherwise) |
 | Speech | Speaches CUDA container | Speaches CPU container |
 | Images | ComfyUI CUDA container | ComfyUI CPU container (slow; native ROCm / XPU builds are the next step) |
+| Detection | Triton Inference Server container (ONNX Runtime on CUDA) | OpenVINO Model Server CPU container; same KServe v2 API and the same ONNX files |
 | Spaces | pull the Hub's CUDA image | pull, or build locally for the CPU |
 | NPU | detected and shown; not used for acceleration yet | same |
 
 WSL2 only exposes NVIDIA GPUs to containers, which is why non-NVIDIA LLM
 serving moves to a native Windows process while containers stay for the
 CPU-only services. NPUs are not visible inside WSL2 at all.
+
+## CV serving
+
+Detection does not go through the VLM. The store runs a KServe v2 model server
+as a platform service on `localhost:8900`: Triton on NVIDIA, OpenVINO Model
+Server elsewhere. Both read the same model repository, a named volume laid out
+as `repo/<model>/1/model.onnx`; the store downloads ONNX exports from the Hub
+into it (YOLOv10 to start) and rewrites `ovms.json` so OpenVINO picks them up,
+while Triton polls the directory. The Rust side is the only client: it
+letterboxes the image, sends one FP32 tensor with the KServe binary extension,
+and maps the detector's rows back to image pixels. The Vision screen therefore
+draws real boxes with scores in well under a second on a GPU, and the same
+screen works unchanged when the server underneath is swapped. The VLM path
+stays for open-ended questions about an image.
 
 ## Local build
 

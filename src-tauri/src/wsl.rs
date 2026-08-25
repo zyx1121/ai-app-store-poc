@@ -89,14 +89,17 @@ pub async fn wsl(args: &[&str]) -> Result<Output> {
 }
 
 /// Run a shell snippet inside our distro as root and wait for it.
+///
+/// `--exec` matters: with `--`, wsl.exe hands the command to the default shell
+/// first, which expands `$var` and `$(...)` in our script before bash sees it.
 pub async fn sh(script: &str) -> Result<Output> {
-    wsl(&["-d", DISTRO, "-u", "root", "--", "bash", "-c", script]).await
+    wsl(&["-d", DISTRO, "-u", "root", "--exec", "bash", "-c", script]).await
 }
 
 /// Spawn a long-running shell snippet inside our distro; caller streams its output.
 pub fn spawn_sh(script: &str) -> Result<Child> {
     let mut c = base("wsl.exe");
-    c.args(["-d", DISTRO, "-u", "root", "--", "bash", "-c", script]);
+    c.args(["-d", DISTRO, "-u", "root", "--exec", "bash", "-c", script]);
     c.spawn()
         .map_err(|e| Error::Spawn("wsl.exe".into(), e.to_string()))
 }

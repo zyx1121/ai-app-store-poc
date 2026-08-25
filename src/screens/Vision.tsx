@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { generateText, streamText } from "ai";
 import {
   Camera,
+  Download,
   ScanSearch,
   Send,
   Square,
@@ -10,9 +11,33 @@ import {
   Upload,
 } from "lucide-react";
 
-import { launchModel, listInstances, onInstanceUpdate, type Instance } from "@/lib/api";
+import {
+  cvDetect,
+  installServiceModel,
+  launchModel,
+  listInstances,
+  onInstanceUpdate,
+  onServiceUpdate,
+  serviceModels,
+  serviceStatus,
+  startService,
+  stopService,
+  type Instance,
+  type ServiceModel,
+  type ServiceState,
+  type ServiceStatus,
+} from "@/lib/api";
 import { ollama } from "@/lib/chat";
+import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import {
   Card,
   CardContent,
@@ -32,10 +57,41 @@ import { MessageResponse } from "@/components/ai-elements/message";
 
 const VISION_TAG_PREFIXES = ["qwen2.5vl", "gemma3", "llava", "minicpm-v", "moondream"];
 const MAX_SIDE = 1024;
+const CV_SERVICE = "cv";
+/** Detector choice meaning "ask the vision-language model for boxes". */
+const VLM_DETECTOR = "vlm";
+const CV_MIN_SCORE = 0.25;
 
 type Dimensions = { width: number; height: number };
 
-type Detection = { label: string; box: [number, number, number, number] };
+type Detection = { label: string; box: [number, number, number, number]; score?: number };
+
+const SERVICE_STATE_LABEL: Record<ServiceState, string> = {
+  missing: "Not installed",
+  pulling: "Pulling image",
+  starting: "Starting",
+  running: "Running",
+  stopped: "Stopped",
+  error: "Error",
+};
+
+const SERVICE_STATE_VARIANT: Record<ServiceState, "default" | "secondary" | "destructive" | "outline"> = {
+  missing: "outline",
+  pulling: "secondary",
+  starting: "secondary",
+  running: "default",
+  stopped: "outline",
+  error: "destructive",
+};
+
+function ServiceStateBadge({ state }: { state: ServiceState }) {
+  const animated = state === "pulling" || state === "starting";
+  return (
+    <Badge variant={SERVICE_STATE_VARIANT[state]} className={cn(animated && "animate-pulse")}>
+      {SERVICE_STATE_LABEL[state]}
+    </Badge>
+  );
+}
 
 function isVisionModelTag(tag: string | null): boolean {
   if (!tag) return false;
@@ -130,6 +186,14 @@ export function Vision() {
   const [detectError, setDetectError] = useState<string | null>(null);
   const [detections, setDetections] = useState<Detection[]>([]);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
+  const [detectSummary, setDetectSummary] = useState<string | null>(null);
+
+  const [cvStatus, setCvStatus] = useState<ServiceStatus | null>(null);
+  const [cvBusy, setCvBusy] = useState(false);
+  const [cvError, setCvError] = useState<string | null>(null);
+  const [cvModels, setCvModels] = useState<ServiceModel[]>([]);
+  const [installing, setInstalling] = useState<string | null>(null);
+  const [detector, setDetector] = useState<string>(VLM_DETECTOR);
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -138,6 +202,8 @@ export function Vision() {
   const imageUrlRef = useRef<string | null>(null);
   const askAbortRef = useRef<AbortController | null>(null);
   const detectTimerRef = useRef<number | null>(null);
+  /** the user picked a detector by hand; stop auto-switching to the CV server */
+  const detectorPickedRef = useRef(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -167,10 +233,86 @@ export function Vision() {
     };
   }, []);
 
+  useEffect(() => {
+    let cancelled = false;
+    serviceStatus(CV_SERVICE).then((s) => {
+      if (!cancelled) setCvStatus(s);
+    });
+    refreshCvModels();
+    let unlisten: (() => void) | undefined;
+    onServiceUpdate((s) => {
+      if (s.id !== CV_SERVICE) return;
+      setCvStatus(s);
+    }).then((fn) => {
+      if (cancelled) fn();
+      else unlisten = fn;
+    });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
+
   const visionCandidates = instances.filter((i) => isVisionModelTag(i.model_tag));
   const visionInstance = visionCandidates.find((i) => i.status === "running");
   const pendingVision = visionCandidates.find((i) => i.status !== "running") ?? visionCandidates[0];
-  const ready = Boolean(visionInstance);
+  const cvRunning = cvStatus?.state === "running";
+  const installedCvModels = cvModels.filter((m) => m.installed);
+  const cvUsable = cvRunning && installedCvModels.length > 0;
+  const ready = Boolean(visionInstance) || cvUsable;
+  const usingCv = detector !== VLM_DETECTOR;
+
+  // Prefer the CV server once it can answer; fall back to the VLM when it cannot.
+  useEffect(() => {
+    if (usingCv && !(cvUsable && installedCvModels.some((m) => m.name === detector))) {
+      setDetector(cvUsable ? installedCvModels[0].name : VLM_DETECTOR);
+    } else if (!usingCv && cvUsable && (!visionInstance || !detectorPickedRef.current)) {
+      setDetector(installedCvModels[0].name);
+    }
+  }, [cvUsable, installedCvModels, detector, usingCv, visionInstance]);
+
+  function refreshCvModels() {
+    serviceModels(CV_SERVICE)
+      .then(setCvModels)
+      .catch((err) => setCvError(err instanceof Error ? err.message : String(err)));
+  }
+
+  async function handleCvStart() {
+    setCvBusy(true);
+    setCvError(null);
+    try {
+      setCvStatus(await startService(CV_SERVICE));
+    } catch (err) {
+      setCvError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setCvBusy(false);
+    }
+  }
+
+  async function handleCvStop() {
+    setCvBusy(true);
+    setCvError(null);
+    try {
+      await stopService(CV_SERVICE);
+    } catch (err) {
+      setCvError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setCvBusy(false);
+    }
+  }
+
+  async function handleInstallCvModel(name: string) {
+    setInstalling(name);
+    setCvError(null);
+    try {
+      await installServiceModel(CV_SERVICE, name);
+      refreshCvModels();
+    } catch (err) {
+      setCvError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setInstalling(null);
+    }
+  }
 
   async function handleStartVisionModel() {
     setLaunching(true);
@@ -208,7 +350,7 @@ export function Vision() {
 
     const rootStyle = getComputedStyle(document.documentElement);
     const primary = rootStyle.getPropertyValue("--primary").trim() || "red";
-    const foreground = rootStyle.getPropertyValue("--foreground").trim() || "black";
+    const foreground = rootStyle.getPropertyValue("--primary-foreground").trim() || "white";
 
     ctx.lineWidth = 2;
     ctx.font = "12px sans-serif";
@@ -223,11 +365,12 @@ export function Vision() {
       ctx.strokeStyle = primary;
       ctx.strokeRect(bx, by, bw, bh);
       const labelY = Math.max(by, 12);
-      const textWidth = ctx.measureText(d.label).width;
+      const text = d.score === undefined ? d.label : `${d.label} ${Math.round(d.score * 100)}%`;
+      const textWidth = ctx.measureText(text).width;
       ctx.fillStyle = primary;
       ctx.fillRect(bx, labelY - 12, textWidth + 6, 14);
       ctx.fillStyle = foreground;
-      ctx.fillText(d.label, bx + 3, labelY + 1);
+      ctx.fillText(text, bx + 3, labelY + 1);
     }
   }, [detections, imageDims]);
 
@@ -379,15 +522,26 @@ export function Vision() {
   }
 
   async function handleDetect() {
-    if (!visionInstance || !imageBytes || !imageDims) return;
+    if (!imageBytes || !imageDims) return;
+    if (usingCv ? !cvUsable : !visionInstance) return;
     setDetecting(true);
     setDetectError(null);
+    setDetectSummary(null);
     setElapsedSeconds(0);
     const startedAt = Date.now();
     detectTimerRef.current = window.setInterval(() => {
       setElapsedSeconds(Math.floor((Date.now() - startedAt) / 1000));
     }, 1000);
     try {
+      if (usingCv) {
+        const result = await cvDetect(imageBytes, detector, CV_MIN_SCORE);
+        setDetections(result.detections.map((d) => ({ label: d.label, box: d.box, score: d.score })));
+        setDetectSummary(
+          `${result.detections.length} objects in ${result.total_ms} ms (${result.model} on ${result.backend})`,
+        );
+        return;
+      }
+      if (!visionInstance) return;
       const prompt =
         `Detect every ${detectQuery.trim() || "object"} in this image. ` +
         `Reply with JSON only: {"objects": [{"label": str, "box": [x1, y1, x2, y2]}]} ` +
@@ -406,6 +560,7 @@ export function Vision() {
         ],
       });
       setDetections(parseDetections(result.text));
+      setDetectSummary(`${Math.round((Date.now() - startedAt) / 1000)} s via ${visionInstance.display_name}`);
     } catch (err) {
       setDetectError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -423,12 +578,13 @@ export function Vision() {
 
   return (
     <div className="flex h-full flex-col gap-3 overflow-y-auto p-6">
-      {!ready ? (
+      {!visionInstance ? (
         <Card className="shrink-0">
           <CardHeader>
             <CardTitle>No vision model running</CardTitle>
             <CardDescription>
-              Vision needs a model like qwen2.5vl, gemma3, llava, minicpm-v, or moondream.
+              Ask needs a vision-language model like qwen2.5vl, gemma3, llava, minicpm-v, or moondream.
+              Detect can use the CV server below instead.
             </CardDescription>
           </CardHeader>
           <CardContent className="flex flex-col gap-2">
@@ -474,6 +630,66 @@ export function Vision() {
           </CardContent>
         </Card>
       )}
+
+      <Card size="sm" className="shrink-0">
+        <CardContent className="flex flex-col gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            {cvStatus && <ServiceStateBadge state={cvStatus.state} />}
+            <span className="text-sm">{cvStatus?.display_name ?? "CV server"}</span>
+            {cvStatus && (
+              <Badge variant="outline" className="font-mono text-xs">
+                {cvStatus.backend}
+              </Badge>
+            )}
+            <span className="flex-1" />
+            <Button
+              size="sm"
+              onClick={() => void handleCvStart()}
+              disabled={cvBusy || cvStatus?.state === "pulling" || cvStatus?.state === "starting" || cvRunning}
+            >
+              {cvStatus?.state === "pulling" || cvStatus?.state === "starting" ? <Spinner /> : null}
+              {cvStatus?.state === "pulling" ? "Pulling..." : cvStatus?.state === "starting" ? "Starting..." : "Start"}
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => void handleCvStop()}
+              disabled={cvBusy || !cvStatus || cvStatus.state === "stopped" || cvStatus.state === "missing"}
+            >
+              Stop
+            </Button>
+          </div>
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+            {cvModels.map((m) => (
+              <div key={m.name} className="flex items-center gap-2 text-sm">
+                <span>{m.display_name}</span>
+                {m.installed ? (
+                  <Badge variant="outline">Installed</Badge>
+                ) : (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={installing !== null}
+                    onClick={() => void handleInstallCvModel(m.name)}
+                  >
+                    {installing === m.name ? <Spinner /> : <Download />}
+                    {installing === m.name ? "Downloading..." : "Download"}
+                  </Button>
+                )}
+              </div>
+            ))}
+          </div>
+          {(cvStatus?.error || cvError) && (
+            <Alert variant="destructive">
+              <TriangleAlert />
+              <AlertDescription>{cvStatus?.error ?? cvError}</AlertDescription>
+            </Alert>
+          )}
+          {cvStatus && cvStatus.state !== "running" && cvStatus.log_tail.length > 0 && (
+            <LogTail lines={cvStatus.log_tail} />
+          )}
+        </CardContent>
+      </Card>
 
       <fieldset disabled={!ready} className="grid shrink-0 grid-cols-1 gap-3 disabled:opacity-50 lg:grid-cols-[minmax(0,1fr)_360px]">
         <Card className="shrink-0">
@@ -553,7 +769,7 @@ export function Vision() {
                   className="min-h-20"
                 />
                 <div className="flex gap-2">
-                  <Button onClick={() => void handleAsk()} disabled={!imageBytes || asking}>
+                  <Button onClick={() => void handleAsk()} disabled={!imageBytes || asking || !visionInstance}>
                     {asking ? <Spinner /> : <Send />} Ask
                   </Button>
                   <Button variant="outline" onClick={handleStopAsk} disabled={!asking}>
@@ -575,27 +791,68 @@ export function Vision() {
 
               <TabsContent value="detect" className="mt-3 flex flex-col gap-3">
                 <div className="flex flex-col gap-1.5">
-                  <label htmlFor="detect-query" className="text-xs text-muted-foreground">
-                    What to look for
+                  <label htmlFor="detector" className="text-xs text-muted-foreground">
+                    Detector
                   </label>
-                  <Input
-                    id="detect-query"
-                    value={detectQuery}
-                    onChange={(e) => setDetectQuery(e.target.value)}
-                    placeholder="person and vehicle"
-                  />
+                  <Select
+                    value={detector}
+                    onValueChange={(v) => {
+                      if (!v) return;
+                      detectorPickedRef.current = true;
+                      setDetector(v);
+                    }}
+                    items={[
+                      ...installedCvModels.map((m) => ({ value: m.name, label: `${m.display_name} via CV server` })),
+                      { value: VLM_DETECTOR, label: "Vision-language model (asks for JSON boxes)" },
+                    ]}
+                  >
+                    <SelectTrigger id="detector" className="w-full">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {installedCvModels.map((m) => (
+                        <SelectItem key={m.name} value={m.name} disabled={!cvRunning}>
+                          {m.display_name} via CV server
+                        </SelectItem>
+                      ))}
+                      <SelectItem value={VLM_DETECTOR} disabled={!visionInstance}>
+                        Vision-language model (asks for JSON boxes)
+                      </SelectItem>
+                    </SelectContent>
+                  </Select>
                 </div>
+                {usingCv ? (
+                  <p className="text-xs text-muted-foreground">
+                    Finds the 80 COCO classes (people, vehicles, animals, everyday objects) with real boxes and scores.
+                  </p>
+                ) : (
+                  <div className="flex flex-col gap-1.5">
+                    <label htmlFor="detect-query" className="text-xs text-muted-foreground">
+                      What to look for
+                    </label>
+                    <Input
+                      id="detect-query"
+                      value={detectQuery}
+                      onChange={(e) => setDetectQuery(e.target.value)}
+                      placeholder="person and vehicle"
+                    />
+                  </div>
+                )}
                 <div className="flex items-center gap-2">
-                  <Button onClick={() => void handleDetect()} disabled={!imageBytes || detecting}>
+                  <Button
+                    onClick={() => void handleDetect()}
+                    disabled={!imageBytes || detecting || (usingCv ? !cvUsable : !visionInstance)}
+                  >
                     {detecting ? <Spinner /> : <ScanSearch />} Detect objects
                   </Button>
                   <Button variant="outline" onClick={handleClearBoxes} disabled={detections.length === 0}>
                     <Trash2 /> Clear boxes
                   </Button>
-                  {(detecting || elapsedSeconds > 0) && (
-                    <span className="text-xs text-muted-foreground">{elapsedSeconds}s</span>
-                  )}
+                  {detecting && <span className="text-xs text-muted-foreground">{elapsedSeconds}s</span>}
                 </div>
+                {!detecting && detectSummary && (
+                  <p className="text-xs text-muted-foreground">{detectSummary}</p>
+                )}
                 {detectError && (
                   <Alert variant="destructive">
                     <TriangleAlert />
@@ -608,6 +865,7 @@ export function Vision() {
                       <thead className="bg-muted text-muted-foreground">
                         <tr>
                           <th className="px-2.5 py-1.5 text-left font-medium">Label</th>
+                          <th className="px-2.5 py-1.5 text-left font-medium">Score</th>
                           <th className="px-2.5 py-1.5 text-left font-medium">Box (x1, y1, x2, y2)</th>
                         </tr>
                       </thead>
@@ -615,7 +873,12 @@ export function Vision() {
                         {detections.map((d, i) => (
                           <tr key={i} className="border-t border-border">
                             <td className="px-2.5 py-1.5">{d.label}</td>
-                            <td className="px-2.5 py-1.5 font-mono text-xs">{d.box.join(", ")}</td>
+                            <td className="px-2.5 py-1.5 font-mono text-xs">
+                              {d.score === undefined ? "-" : `${Math.round(d.score * 100)}%`}
+                            </td>
+                            <td className="px-2.5 py-1.5 font-mono text-xs">
+                              {d.box.map((n) => Math.round(n)).join(", ")}
+                            </td>
                           </tr>
                         ))}
                       </tbody>

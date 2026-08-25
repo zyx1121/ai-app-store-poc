@@ -36,6 +36,7 @@ function runtimePlan(vendor: Vendor): string[] {
       "LLM: Ollama in WSL (CUDA)",
       "Speech: Speaches (CUDA)",
       "Images: ComfyUI (CUDA)",
+      "Detection: Triton Inference Server (CUDA)",
       "Spaces: pull CUDA images",
     ];
   }
@@ -43,6 +44,7 @@ function runtimePlan(vendor: Vendor): string[] {
     "LLM: Ollama on Windows (ROCm / Vulkan)",
     "Speech: Speaches (CPU)",
     "Images: ComfyUI (CPU, slow)",
+    "Detection: OpenVINO Model Server (CPU)",
     "Spaces: pull, or build locally for CPU",
   ];
 }

@@ -1,4 +1,5 @@
 mod build;
+mod cv;
 mod error;
 mod hardware;
 mod hf;
@@ -124,6 +125,30 @@ async fn stop_service(app: AppHandle, id: services::ServiceId) -> CmdResult<()> 
     cmd(services::stop(app, id).await)
 }
 
+/// Run a detector on an image through the CV service. The image travels as the raw
+/// request body (no JSON encoding of bytes); options come as headers.
+#[tauri::command]
+async fn cv_detect(
+    app: AppHandle,
+    request: tauri::ipc::Request<'_>,
+) -> CmdResult<cv::DetectResult> {
+    let header = |k: &str| {
+        request
+            .headers()
+            .get(k)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string)
+    };
+    let model = header("x-model").unwrap_or_else(|| "yolov10n".into());
+    let min_score: f32 = header("x-min-score")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0.25);
+    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else {
+        return Err("cv_detect expects the image as the raw request body".into());
+    };
+    cmd(cv::detect(&app, &model, bytes, min_score).await)
+}
+
 #[tauri::command]
 fn open_url(app: AppHandle, url: String) -> CmdResult<()> {
     if !(url.starts_with("http://") || url.starts_with("https://")) {
@@ -185,6 +210,7 @@ pub fn run() {
             stop_service,
             service_models,
             install_service_model,
+            cv_detect,
             open_url,
         ])
         .run(tauri::generate_context!())
