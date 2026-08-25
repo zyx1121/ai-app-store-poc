@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::error::{Error, Result};
+use crate::hardware::Vendor;
 use crate::state::AppState;
 use crate::wsl;
 
@@ -41,10 +42,13 @@ pub struct ServiceStatus {
     pub port: u16,
     pub url: String,
     pub image_present: bool,
+    /// which implementation this machine got, e.g. `cuda` or `cpu`
+    pub backend: String,
     pub error: Option<String>,
     pub log_tail: Vec<String>,
 }
 
+#[derive(Clone, Copy)]
 struct ServiceSpec {
     id: ServiceId,
     display_name: &'static str,
@@ -98,10 +102,27 @@ const COMFYUI: ServiceSpec = ServiceSpec {
     )],
 };
 
-fn spec(id: ServiceId) -> &'static ServiceSpec {
-    match id {
-        ServiceId::Speaches => &SPEACHES,
-        ServiceId::Comfyui => &COMFYUI,
+/// CPU builds for machines whose GPU WSL2 cannot see (AMD, Intel) or that have none.
+const SPEACHES_CPU: ServiceSpec = ServiceSpec {
+    image: "ghcr.io/speaches-ai/speaches:latest-cpu",
+    gpu: false,
+    ..SPEACHES
+};
+
+const COMFYUI_CPU: ServiceSpec = ServiceSpec {
+    image: "yanwk/comfyui-boot:cpu",
+    gpu: false,
+    env: &[("CLI_ARGS", "--enable-cors-header --cpu")],
+    ..COMFYUI
+};
+
+/// The implementation of a service for this machine's GPU vendor.
+fn spec(id: ServiceId, vendor: Vendor) -> &'static ServiceSpec {
+    match (id, vendor) {
+        (ServiceId::Speaches, Vendor::Nvidia) => &SPEACHES,
+        (ServiceId::Speaches, _) => &SPEACHES_CPU,
+        (ServiceId::Comfyui, Vendor::Nvidia) => &COMFYUI,
+        (ServiceId::Comfyui, _) => &COMFYUI_CPU,
     }
 }
 
@@ -113,8 +134,8 @@ pub struct ServiceModel {
     pub installed: bool,
 }
 
-pub async fn models(id: ServiceId) -> Result<Vec<ServiceModel>> {
-    let s = spec(id);
+pub async fn models(app: &AppHandle, id: ServiceId) -> Result<Vec<ServiceModel>> {
+    let s = spec(id, app.state::<AppState>().vendor());
     let mut out = Vec::new();
     for (name, _url, path) in s.models {
         let probe = format!("docker exec {} test -s '{}' && echo YES", s.container, path);
@@ -134,7 +155,7 @@ pub async fn models(id: ServiceId) -> Result<Vec<ServiceModel>> {
 /// Download one of the service's model files into the running container,
 /// streaming progress into the service log. Blocks until done.
 pub async fn install_model(app: AppHandle, id: ServiceId, name: String) -> Result<ServiceModel> {
-    let s = spec(id);
+    let s = spec(id, app.state::<AppState>().vendor());
     let Some((_, url, path)) = s.models.iter().find(|(n, _, _)| *n == name) else {
         return Err(Error::Other(format!(
             "`{name}` is not a known model for {id:?}"
@@ -173,6 +194,7 @@ fn base_status(s: &ServiceSpec) -> ServiceStatus {
         port: s.host_port,
         url: format!("http://localhost:{}", s.host_port),
         image_present: false,
+        backend: if s.gpu { "cuda".into() } else { "cpu".into() },
         error: None,
         log_tail: vec![],
     }
@@ -184,12 +206,15 @@ fn get(state: &AppState, id: ServiceId) -> Option<ServiceStatus> {
 
 fn update(app: &AppHandle, id: ServiceId, f: impl FnOnce(&mut ServiceStatus)) {
     let state = app.state::<AppState>();
+    let vendor = state.vendor();
     let snapshot = {
         let mut map = match state.services.lock() {
             Ok(m) => m,
             Err(_) => return,
         };
-        let entry = map.entry(id).or_insert_with(|| base_status(spec(id)));
+        let entry = map
+            .entry(id)
+            .or_insert_with(|| base_status(spec(id, vendor)));
         f(entry);
         entry.clone()
     };
@@ -215,8 +240,8 @@ fn fail(app: &AppHandle, id: ServiceId, msg: String) {
 
 /// Probe docker for the real state and store it; the UI's `service_status` command.
 pub async fn status(app: &AppHandle, id: ServiceId) -> Result<ServiceStatus> {
-    let s = spec(id);
     let state = app.state::<AppState>();
+    let s = spec(id, state.vendor());
     let busy = get(&state, id)
         .map(|st| matches!(st.state, ServiceState::Pulling | ServiceState::Starting))
         .unwrap_or(false);
@@ -239,6 +264,7 @@ pub async fn status(app: &AppHandle, id: ServiceId) -> Result<ServiceStatus> {
     let healthy = out.stdout.lines().any(|l| l.trim() == "HEALTHY");
     update(app, id, |st| {
         st.image_present = image_present;
+        st.backend = if s.gpu { "cuda".into() } else { "cpu".into() };
         st.error = None;
         st.state = if running && healthy {
             ServiceState::Running
@@ -286,7 +312,7 @@ pub async fn start(app: AppHandle, id: ServiceId) -> Result<ServiceStatus> {
 }
 
 async fn run(app: &AppHandle, id: ServiceId, gpu: bool) -> Result<()> {
-    let s = spec(id);
+    let s = spec(id, app.state::<AppState>().vendor());
     let has_image = get(&app.state::<AppState>(), id)
         .map(|st| st.image_present)
         .unwrap_or(false);
@@ -381,7 +407,7 @@ async fn run(app: &AppHandle, id: ServiceId, gpu: bool) -> Result<()> {
 }
 
 pub async fn stop(app: AppHandle, id: ServiceId) -> Result<()> {
-    let s = spec(id);
+    let s = spec(id, app.state::<AppState>().vendor());
     let _ = wsl::sh(&format!("docker rm -f {} >/dev/null 2>&1", s.container)).await;
     update(&app, id, |st| {
         st.state = if st.image_present {

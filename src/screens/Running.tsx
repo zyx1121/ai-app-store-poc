@@ -90,6 +90,7 @@ export function Running({ onOpenChat }: { onOpenChat: (instanceId: string) => vo
             <CardContent className="flex flex-col gap-2">
               <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
                 <StatusBadge status={instance.status} />
+                {instance.local_build && <Badge variant="outline">Built locally</Badge>}
                 {instance.port && <span>port {instance.port}</span>}
                 {instance.url && <span className="truncate">{instance.url}</span>}
               </div>

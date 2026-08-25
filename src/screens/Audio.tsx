@@ -432,8 +432,14 @@ export function Audio() {
           <CardTitle className="flex items-center gap-2">
             <span>Speaches</span>
             {status && <ServiceStateBadge state={status.state} />}
+            {status && <Badge variant="outline">{status.backend}</Badge>}
           </CardTitle>
           <CardDescription>{status?.url ?? SPEACHES_BASE_URL}</CardDescription>
+          {status?.backend === "cpu" && (
+            <p className="text-xs text-muted-foreground">
+              Running on CPU: transcription is slower
+            </p>
+          )}
         </CardHeader>
         <CardContent className="flex flex-col gap-2">
           {status?.error && <p className="text-xs text-destructive">{status.error}</p>}

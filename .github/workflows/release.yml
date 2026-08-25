@@ -1,0 +1,42 @@
+name: release
+
+# Tag v* -> signed MSI + .sig + latest.json on a GitHub Release. The app's
+# updater reads latest.json from the "latest" release of this repository.
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - run: bun install --frozen-lockfile
+
+      # Builds the MSI, signs it with the updater key, and publishes the release
+      # with latest.json. The private key is the TAURI_SIGNING_PRIVATE_KEY secret
+      # (generated once with `tauri signer generate`; public half in tauri.conf.json).
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: AI App Store ${{ github.ref_name }}
+          releaseBody: See the commit log for changes.
+          releaseDraft: false
+          prerelease: false
+          args: --bundles msi
+          includeUpdaterJson: true

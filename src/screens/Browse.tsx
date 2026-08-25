@@ -1,5 +1,6 @@
 import { useEffect, useState, type KeyboardEvent } from "react";
 import {
+  buildSpace,
   launchModel,
   launchSpace,
   modelFiles,
@@ -23,6 +24,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import {
   Dialog,
   DialogContent,
@@ -76,7 +78,10 @@ export function Browse({ onLaunched }: { onLaunched: () => void }) {
   const [modelsState, setModelsState] = useState<LoadState>("loading");
 
   const [launchingId, setLaunchingId] = useState<string | null>(null);
+  const [buildingId, setBuildingId] = useState<string | null>(null);
   const [launchError, setLaunchError] = useState<string | null>(null);
+  const [spacesError, setSpacesError] = useState<string | null>(null);
+  const [modelsError, setModelsError] = useState<string | null>(null);
 
   const [dialogModel, setDialogModel] = useState<ModelSummary | null>(null);
   const [files, setFiles] = useState<GgufFile[]>([]);
@@ -98,8 +103,10 @@ export function Browse({ onLaunched }: { onLaunched: () => void }) {
         setSpaces(res);
         setSpacesState("idle");
       })
-      .catch(() => {
-        if (!cancelled) setSpacesState("error");
+      .catch((e: unknown) => {
+        if (cancelled) return;
+        setSpacesError(String(e));
+        setSpacesState("error");
       });
     return () => {
       cancelled = true;
@@ -115,8 +122,10 @@ export function Browse({ onLaunched }: { onLaunched: () => void }) {
         setModels(res);
         setModelsState("idle");
       })
-      .catch(() => {
-        if (!cancelled) setModelsState("error");
+      .catch((e: unknown) => {
+        if (cancelled) return;
+        setModelsError(String(e));
+        setModelsState("error");
       });
     return () => {
       cancelled = true;
@@ -157,6 +166,19 @@ export function Browse({ onLaunched }: { onLaunched: () => void }) {
       setLaunchError(String(e));
     } finally {
       setLaunchingId(null);
+    }
+  }
+
+  async function runBuildSpace(space: SpaceSummary) {
+    setLaunchError(null);
+    setBuildingId(space.id);
+    try {
+      await buildSpace(space.id);
+      onLaunched();
+    } catch (e) {
+      setLaunchError(String(e));
+    } finally {
+      setBuildingId(null);
     }
   }
 
@@ -203,7 +225,7 @@ export function Browse({ onLaunched }: { onLaunched: () => void }) {
           {spacesState === "error" && (
             <Alert variant="destructive">
               <AlertTitle>Could not load apps</AlertTitle>
-              <AlertDescription>Search Hugging Face Spaces failed. Try again.</AlertDescription>
+              <AlertDescription>{spacesError ?? "Search Hugging Face Spaces failed. Try again."}</AlertDescription>
             </Alert>
           )}
           {spacesState === "idle" && spaces.length === 0 && (
@@ -230,14 +252,37 @@ export function Browse({ onLaunched }: { onLaunched: () => void }) {
                     <span>{formatCount(space.likes)} likes</span>
                     {space.hardware && <span>{space.hardware}</span>}
                   </CardContent>
-                  <CardFooter>
+                  <CardFooter className="flex gap-2">
                     <Button
-                      className="w-full"
+                      className="flex-1"
                       disabled={space.compat === "incompatible" || launchingId === space.id}
                       onClick={() => runSpace(space)}
                     >
                       {launchingId === space.id ? "Launching..." : "Run"}
                     </Button>
+                    {space.sdk !== "static" && (
+                      <Tooltip>
+                        <TooltipTrigger
+                          render={
+                            <Button
+                              variant="outline"
+                              disabled={
+                                buildingId === space.id ||
+                                (space.compat === "incompatible" &&
+                                  (space.compat_reason?.toLowerCase().includes("static") ?? false))
+                              }
+                              onClick={() => runBuildSpace(space)}
+                            />
+                          }
+                        >
+                          {buildingId === space.id ? "Building..." : "Build locally"}
+                        </TooltipTrigger>
+                        <TooltipContent>
+                          Clone the Space and build its image on this machine (CPU on non-NVIDIA
+                          GPUs)
+                        </TooltipContent>
+                      </Tooltip>
+                    )}
                   </CardFooter>
                 </Card>
               ))}
@@ -250,7 +295,7 @@ export function Browse({ onLaunched }: { onLaunched: () => void }) {
           {modelsState === "error" && (
             <Alert variant="destructive">
               <AlertTitle>Could not load models</AlertTitle>
-              <AlertDescription>Search Hugging Face models failed. Try again.</AlertDescription>
+              <AlertDescription>{modelsError ?? "Search Hugging Face models failed. Try again."}</AlertDescription>
             </Alert>
           )}
           {modelsState === "idle" && models.length === 0 && (

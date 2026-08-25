@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
 
 use crate::error::{Error, Result};
+use crate::hardware::{self, HardwareProfile, Vendor};
+use crate::ollama;
 use crate::state::AppState;
 use crate::wsl::{self, DISTRO};
 
@@ -24,6 +26,9 @@ pub struct RuntimeStatus {
     pub vram_mb: Option<u64>,
     pub ready: bool,
     pub reboot_required: bool,
+    /// GPUs and NPUs on the host and the vendor the runtime is built around.
+    pub hardware: HardwareProfile,
+    pub vendor: Vendor,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -46,6 +51,12 @@ fn emit(app: &AppHandle, step: &str, status: &'static str, message: impl Into<St
 /// Probe everything. Never fails: a missing piece is a `false`, not an error.
 pub async fn status() -> RuntimeStatus {
     let mut s = RuntimeStatus::default();
+    s.hardware = hardware::probe().await;
+    s.vendor = s.hardware.vendor;
+    if let Some(g) = &s.hardware.primary_gpu {
+        s.gpu_name = Some(g.name.clone());
+        s.vram_mb = g.vram_mb;
+    }
 
     match wsl::wsl(&["--status"]).await {
         Ok(o) if o.ok() => s.wsl_installed = true,
@@ -74,7 +85,6 @@ pub async fn status() -> RuntimeStatus {
     let probe = r#"
         systemctl is-active --quiet docker && docker info >/dev/null 2>&1 && echo DOCKER_OK
         docker info --format '{{json .Runtimes}}' 2>/dev/null | grep -q nvidia && echo GPU_RUNTIME
-        curl -sf -m 3 http://127.0.0.1:11434/api/version >/dev/null 2>&1 && echo OLLAMA_OK
         if [ -x /usr/lib/wsl/lib/nvidia-smi ]; then
           echo "GPU_INFO $(/usr/lib/wsl/lib/nvidia-smi --query-gpu=name,memory.total --format=csv,noheader,nounits 2>/dev/null | head -1)"
         fi
@@ -86,7 +96,6 @@ pub async fn status() -> RuntimeStatus {
             match line {
                 "DOCKER_OK" => s.docker_ok = true,
                 "GPU_RUNTIME" => gpu_runtime = true,
-                "OLLAMA_OK" => s.ollama_ok = true,
                 l if l.starts_with("GPU_INFO ") => {
                     let rest = &l["GPU_INFO ".len()..];
                     let mut parts = rest.rsplitn(2, ',');
@@ -103,9 +112,11 @@ pub async fn status() -> RuntimeStatus {
                 _ => {}
             }
         }
-        s.gpu_ok = gpu_runtime && s.gpu_name.is_some();
+        s.gpu_ok = gpu_runtime && s.vendor == Vendor::Nvidia;
         s.distro_running = true;
     }
+    // Ollama answers on localhost whether it runs in WSL (NVIDIA) or natively (others).
+    s.ollama_ok = ollama::is_up().await;
     finish(s)
 }
 
@@ -202,8 +213,18 @@ pub async fn provision(app: &AppHandle, state: &AppState) -> Result<RuntimeStatu
         "start",
         "Installing Docker, NVIDIA toolkit, Ollama inside the distro",
     );
+    // The Rust side knows the vendor; the script gates the WSL Ollama install on it.
     // A Windows checkout may have turned the script into CRLF; bash rejects that.
-    let script = PROVISION_SCRIPT.replace("\r\n", "\n");
+    let script = format!(
+        "export AIAS_VENDOR={}\n{}",
+        match s.vendor {
+            Vendor::Nvidia => "nvidia",
+            Vendor::Amd => "amd",
+            Vendor::Intel => "intel",
+            Vendor::Cpu => "cpu",
+        },
+        PROVISION_SCRIPT.replace("\r\n", "\n")
+    );
     let child = wsl::spawn_script(&script).await?;
     let code = wsl::stream_lines(child, |l| emit(app, "provision", "log", l)).await?;
     if code != 0 {
@@ -231,14 +252,39 @@ pub async fn provision(app: &AppHandle, state: &AppState) -> Result<RuntimeStatu
     let _ = wsl::wsl(&["--terminate", DISTRO]).await;
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     state.ensure_keepalive();
-    let boot = wsl::sh(
-        "systemctl is-system-running --wait >/dev/null 2>&1; systemctl enable --now docker ollama >/dev/null 2>&1; \
-         for i in $(seq 1 30); do curl -sf -m 2 http://127.0.0.1:11434/api/version >/dev/null && break; sleep 1; done; \
-         systemctl is-active docker ollama",
-    )
-    .await?;
+    let boot = if s.vendor == Vendor::Nvidia {
+        wsl::sh(
+            "systemctl is-system-running --wait >/dev/null 2>&1; systemctl enable --now docker ollama >/dev/null 2>&1; \
+             for i in $(seq 1 30); do curl -sf -m 2 http://127.0.0.1:11434/api/version >/dev/null && break; sleep 1; done; \
+             systemctl is-active docker ollama",
+        )
+        .await?
+    } else {
+        wsl::sh(
+            "systemctl is-system-running --wait >/dev/null 2>&1; systemctl enable --now docker >/dev/null 2>&1; systemctl is-active docker",
+        )
+        .await?
+    };
     emit(app, "restart", "log", boot.stdout.trim().to_string());
     emit(app, "restart", "ok", "services up");
+
+    if s.vendor != Vendor::Nvidia {
+        emit(
+            app,
+            "ollama",
+            "start",
+            "Ollama runs natively on Windows for this GPU",
+        );
+        // The store cannot see the hardware profile from inside the distro; store the
+        // fresh status first so `ensure_native` knows the vendor.
+        if let Ok(mut g) = state.runtime.lock() {
+            *g = Some(s.clone());
+        }
+        match ollama::ensure_native(state, |l| emit(app, "ollama", "log", l)).await {
+            Ok(()) => emit(app, "ollama", "ok", "Ollama up on localhost:11434"),
+            Err(e) => emit(app, "ollama", "error", e.to_string()),
+        }
+    }
 
     let s = refresh(state).await;
     if s.ready {

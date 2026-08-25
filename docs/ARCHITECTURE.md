@@ -54,6 +54,46 @@ reason string. An `incompatible` item cannot be launched.
 | Models | `ollama pull hf.co/<repo>:<quant>`, warm load through `/api/generate`, served on `localhost:11434/v1`; the Chat screen streams from it directly |
 | Contract | every command and event is typed once in `src/lib/api.ts`; the Rust side mirrors it with serde |
 
+## Hardware vendors
+
+The store probes the host (PowerShell: video controllers with VRAM from the
+driver registry key, NPU devices) and picks a primary vendor. Everything below
+the UI keys off it; the four base UIs only ever talk to `localhost` APIs.
+
+| | NVIDIA | AMD / Intel / CPU |
+|---|---|---|
+| LLM | Ollama inside WSL2 (CUDA) | Ollama for Windows, started headless by the store (ROCm on supported Radeon, Vulkan otherwise) |
+| Speech | Speaches CUDA container | Speaches CPU container |
+| Images | ComfyUI CUDA container | ComfyUI CPU container (slow; native ROCm / XPU builds are the next step) |
+| Spaces | pull the Hub's CUDA image | pull, or build locally for the CPU |
+| NPU | detected and shown; not used for acceleration yet | same |
+
+WSL2 only exposes NVIDIA GPUs to containers, which is why non-NVIDIA LLM
+serving moves to a native Windows process while containers stay for the
+CPU-only services. NPUs are not visible inside WSL2 at all.
+
+## Local build
+
+The Hub builds Space images on NVIDIA tiers only. When a Space has no image, or
+the GPU is not NVIDIA, the store clones the Space into the distro, generates a
+Dockerfile for gradio / streamlit Spaces (slim Python, SDK pinned to
+`sdk_version`, requirements, `app_file` as entrypoint) or uses the Space's own
+Dockerfile, and builds `aias-local/<slug>`. Dependencies are resolved with
+`uv --exclude-newer <SDK release date + 7 days>` so an old Space gets the
+dependency set of its era (a 2023 gradio with today's starlette does not start).
+Non-NVIDIA builds pin `torch` to the CPU wheel index. Requirements that only ship CUDA builds (flash-attn, xformers,
+bitsandbytes, custom kernels) are refused up front with the reason instead of
+failing fifteen minutes in.
+
+## Store updates
+
+`tauri-plugin-updater` reads `latest.json` from the repository's latest GitHub
+Release and verifies the MSI against the public key in `tauri.conf.json`.
+`release.yml` builds and signs on `v*` tags. The runtime inside the distro is
+updated by re-running the idempotent `provision.sh`. Note: GitHub release assets
+of a private repository are not reachable by the updater; publish the repo or
+mirror `latest.json` and the MSI to a public HTTPS host.
+
 ## What a product adds
 
 - **Installer**: MSI (Tauri bundler) that also ships a pre-baked distro rootfs

@@ -33,8 +33,10 @@ jobs:
       - run: cargo test
         working-directory: src-tauri
 
+      # CI builds are unsigned; release.yml signs updater artifacts with the private key.
       - name: Bundle MSI
-        run: bun tauri build --bundles msi
+        run: bun tauri build --bundles msi --config '{"bundle":{"createUpdaterArtifacts":false}}'
+        shell: bash
 
       - uses: actions/upload-artifact@v4
         with:

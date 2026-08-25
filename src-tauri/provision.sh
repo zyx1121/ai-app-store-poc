@@ -13,7 +13,7 @@ printf '[boot]\nsystemd=true\n[user]\ndefault=root\n' > /etc/wsl.conf
 step "apt: base packages + Docker Engine"
 apt-get update -qq
 apt-get install -y -qq --no-install-recommends \
-  ca-certificates curl gnupg zstd docker.io docker-compose-v2 >/dev/null
+  ca-certificates curl gnupg zstd git git-lfs docker.io docker-buildx docker-compose-v2 >/dev/null
 docker --version
 
 if [ -x /usr/lib/wsl/lib/nvidia-smi ] && /usr/lib/wsl/lib/nvidia-smi -L >/dev/null 2>&1; then
@@ -33,7 +33,10 @@ else
   step "no NVIDIA GPU visible inside WSL, skipping container toolkit"
 fi
 
-step "Ollama"
+# AIAS_VENDOR is prepended by the Rust side. Only NVIDIA GPUs reach WSL2, so
+# Ollama lives here only on NVIDIA machines; elsewhere it runs on Windows.
+if [ "${AIAS_VENDOR:-nvidia}" = "nvidia" ]; then
+step "Ollama (inside WSL, CUDA)"
 if ! command -v ollama >/dev/null 2>&1; then
   curl -fsSL https://ollama.com/install.sh | sh
 fi
@@ -47,8 +50,13 @@ Environment=OLLAMA_FLASH_ATTENTION=1
 Environment=OLLAMA_KV_CACHE_TYPE=q8_0
 EOF
 ollama --version 2>/dev/null | head -1 || true
+else
+step "Ollama runs natively on Windows for ${AIAS_VENDOR}; skipping the WSL copy"
+systemctl disable --now ollama >/dev/null 2>&1 || true
+fi
 
 step "enable services (takes effect after the distro restarts with systemd)"
-systemctl enable docker ollama >/dev/null 2>&1 || true
+systemctl enable docker >/dev/null 2>&1 || true
+[ "${AIAS_VENDOR:-nvidia}" = "nvidia" ] && systemctl enable ollama >/dev/null 2>&1 || true
 
 step "provision complete"

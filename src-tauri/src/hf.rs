@@ -24,6 +24,7 @@ pub struct SpaceSummary {
     pub author: String,
     pub name: String,
     pub sdk: Option<String>,
+    pub sdk_version: Option<String>,
     pub likes: u64,
     pub hardware: Option<String>,
     pub app_port: u16,
@@ -84,6 +85,26 @@ struct RawCard {
     app_file: Option<String>,
     #[serde(default)]
     sdk: Option<String>,
+    /// Card YAML lets authors write `sdk_version: 3.5`, which arrives as a number.
+    #[serde(default, deserialize_with = "string_or_number")]
+    sdk_version: Option<String>,
+}
+
+fn string_or_number<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> std::result::Result<Option<String>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum V {
+        S(String),
+        N(serde_json::Number),
+        Other(serde::de::IgnoredAny),
+    }
+    Ok(match Option::<V>::deserialize(d)? {
+        Some(V::S(s)) => Some(s),
+        Some(V::N(n)) => Some(n.to_string()),
+        Some(V::Other(_)) | None => None,
+    })
 }
 
 #[derive(Deserialize, Default, Clone)]
@@ -198,6 +219,7 @@ fn summarize_space(s: RawSpace, runtime: Option<RawRuntime>, has_gpu: bool) -> S
         author,
         name,
         sdk,
+        sdk_version: card.sdk_version,
         likes: s.likes,
         hardware,
         app_port,
@@ -456,6 +478,18 @@ mod tests {
             space_compat(Some("gradio"), Some("SLEEPING"), Some("cpu-basic"), true).0,
             Compat::Ready
         );
+    }
+
+    #[test]
+    fn numeric_sdk_version_is_tolerated() {
+        let raw: RawSpace = serde_json::from_str(
+            r#"{"id":"a/b","cardData":{"sdk":"gradio","sdk_version":3.5,"app_file":"app.py"}}"#,
+        )
+        .unwrap();
+        assert_eq!(raw.card.unwrap().sdk_version.as_deref(), Some("3.5"));
+        let raw: RawSpace =
+            serde_json::from_str(r#"{"id":"a/b","cardData":{"sdk_version":"4.44.1"}}"#).unwrap();
+        assert_eq!(raw.card.unwrap().sdk_version.as_deref(), Some("4.44.1"));
     }
 
     #[test]

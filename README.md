@@ -42,7 +42,7 @@ Edge AI boxes ship with a GPU and nothing to run on it. Getting one Hugging Face
 
 ## Install
 
-Windows 11 with virtualization enabled and an NVIDIA GPU (CPU-only works for CPU Spaces and small models).
+Windows 11 with virtualization enabled. NVIDIA GPUs get the full CUDA path; AMD and Intel GPUs run LLMs natively through Ollama (ROCm / Vulkan) with speech and image services on the CPU; NPUs are detected but not used yet. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#hardware-vendors).
 
 1. Download the latest `.msi` from [Releases](https://github.com/zyx1121/ai-app-store-poc/releases) and install it.
 2. Open **AI App Store**. The Setup screen lists what is missing; click **Install runtime**. If WSL was just enabled, reboot when asked and open the app again.
@@ -77,7 +77,10 @@ The layer model this PoC is a slice of, and what a production version adds (flee
 ## Roadmap
 
 - [ ] Pre-baked distro rootfs shipped with the installer instead of provisioning on first run
-- [ ] Auto-update for the app (tauri-plugin-updater) and A/B update for the distro
+- [x] Auto-update for the app (tauri-plugin-updater; needs a public release host)
+- [x] Hardware profile and per-vendor runtime (NVIDIA / AMD / Intel / CPU)
+- [x] Build Space images locally when the Hub has none for this GPU
+- [ ] Native ROCm / XPU builds of ComfyUI and Speaches; NPU backends
 - [ ] Space secrets and HF token for gated repos
 - [ ] Voice and vision base UIs next to Chat
 - [ ] Linux host support (no WSL layer)

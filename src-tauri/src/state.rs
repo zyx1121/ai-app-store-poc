@@ -3,6 +3,7 @@ use std::sync::Mutex;
 
 use tokio::process::Child;
 
+use crate::hardware::Vendor;
 use crate::instances::Instance;
 use crate::runtime::RuntimeStatus;
 use crate::services::{ServiceId, ServiceStatus};
@@ -16,6 +17,8 @@ pub struct AppState {
     pub keepalive: Mutex<Option<Child>>,
     pub discovered: Mutex<bool>,
     pub services: Mutex<HashMap<ServiceId, ServiceStatus>>,
+    /// `ollama serve` we started on Windows (non-NVIDIA machines only).
+    pub native_ollama: Mutex<Option<Child>>,
 }
 
 impl Default for AppState {
@@ -32,11 +35,21 @@ impl Default for AppState {
             keepalive: Mutex::new(None),
             discovered: Mutex::new(false),
             services: Mutex::new(HashMap::new()),
+            native_ollama: Mutex::new(None),
         }
     }
 }
 
 impl AppState {
+    /// GPU vendor the runtime is built around (CPU until the first probe).
+    pub fn vendor(&self) -> Vendor {
+        self.runtime
+            .lock()
+            .ok()
+            .and_then(|r| r.as_ref().map(|s| s.vendor))
+            .unwrap_or_default()
+    }
+
     pub fn has_gpu(&self) -> bool {
         self.runtime
             .lock()

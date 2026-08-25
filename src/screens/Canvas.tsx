@@ -539,8 +539,14 @@ export function Canvas() {
           <CardTitle className="flex items-center gap-2">
             <span>ComfyUI</span>
             {status && <ServiceStateBadge state={status.state} />}
+            {status && <Badge variant="outline">{status.backend}</Badge>}
           </CardTitle>
           <CardDescription>{status?.url ?? COMFYUI_BASE_URL}</CardDescription>
+          {status?.backend === "cpu" && (
+            <p className="text-xs text-muted-foreground">
+              Running on CPU: expect about a minute per image
+            </p>
+          )}
         </CardHeader>
         <CardContent className="flex flex-col gap-2">
           {status?.error && <p className="text-xs text-destructive">{status.error}</p>}

@@ -7,8 +7,10 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
 
+use crate::build;
 use crate::error::{Error, Result};
 use crate::hf;
+use crate::ollama;
 use crate::state::AppState;
 use crate::wsl::{self, slug};
 
@@ -31,6 +33,8 @@ pub enum Kind {
 #[serde(rename_all = "lowercase")]
 pub enum Status {
     Pulling,
+    /// cloning and building the image on this machine
+    Building,
     Starting,
     Running,
     Error,
@@ -50,6 +54,8 @@ pub struct Instance {
     pub error: Option<String>,
     pub log_tail: Vec<String>,
     pub started_at: String,
+    /// image was built on this machine instead of pulled from the Hub
+    pub local_build: bool,
 }
 
 fn now() -> String {
@@ -142,11 +148,33 @@ pub async fn launch_space(app: AppHandle, id: String) -> Result<Instance> {
         ));
     }
 
+    start_space(app, space, false).await
+}
+
+/// Build the Space's image on this machine, then run it. The path for GPUs the
+/// Hub never built for (AMD, Intel, CPU) and for Spaces without an image.
+pub async fn build_space(app: AppHandle, id: String) -> Result<Instance> {
+    let state = app.state::<AppState>();
+    require_ready(&state)?;
+    let space = hf::space(&state.http, &id, state.has_gpu()).await?;
+    if matches!(space.sdk.as_deref(), Some("static")) {
+        return Err(Error::Other("static Spaces have nothing to build".into()));
+    }
+    start_space(app, space, true).await
+}
+
+async fn start_space(
+    app: AppHandle,
+    space: hf::SpaceSummary,
+    local_build: bool,
+) -> Result<Instance> {
+    let state = app.state::<AppState>();
+    let id = space.id.clone();
     let inst_id = format!("space-{}", slug(&id));
     if let Some(existing) = get(&state, &inst_id) {
         if matches!(
             existing.status,
-            Status::Pulling | Status::Starting | Status::Running
+            Status::Pulling | Status::Building | Status::Starting | Status::Running
         ) {
             return Ok(existing);
         }
@@ -157,20 +185,43 @@ pub async fn launch_space(app: AppHandle, id: String) -> Result<Instance> {
         repo: id.clone(),
         model_tag: None,
         display_name: space.title.clone().unwrap_or_else(|| space.name.clone()),
-        status: Status::Pulling,
+        status: if local_build {
+            Status::Building
+        } else {
+            Status::Pulling
+        },
         port: None,
         url: None,
         error: None,
         log_tail: vec![],
         started_at: now(),
+        local_build,
     };
     insert(&state, inst.clone());
 
-    let image = format!("registry.hf.space/{}:latest", slug(&id));
     let gpu = state.has_gpu();
+    let vendor = state.vendor();
     let app2 = app.clone();
     tokio::spawn(async move {
-        if let Err(e) = run_space(&app2, &inst_id, &image, &space, gpu).await {
+        let image = if local_build {
+            let app3 = app2.clone();
+            let iid = inst_id.clone();
+            let http = app2.state::<AppState>().http.clone();
+            match build::build_space(&http, &space, slug(&id).as_str(), vendor, move |l| {
+                push_log(&app3, &iid, l)
+            })
+            .await
+            {
+                Ok(img) => img,
+                Err(e) => {
+                    fail(&app2, &inst_id, e.to_string());
+                    return;
+                }
+            }
+        } else {
+            format!("registry.hf.space/{}:latest", slug(&id))
+        };
+        if let Err(e) = run_space(&app2, &inst_id, &image, &space, gpu, !local_build).await {
             fail(&app2, &inst_id, e.to_string());
         }
     });
@@ -198,16 +249,19 @@ async fn run_space(
     image: &str,
     space: &hf::SpaceSummary,
     gpu: bool,
+    pull: bool,
 ) -> Result<()> {
     let cname = container_name(id);
     let app_port = space.app_port;
-    push_log(app, id, format!("docker pull {image}"));
-    let child = wsl::spawn_sh(&format!("docker pull {image} 2>&1"))?;
-    let code = wsl::stream_lines(child, |l| push_log(app, id, l)).await?;
-    if code != 0 {
-        return Err(Error::Other(format!(
-            "image pull failed ({code}); the Space may be private, gated, or have no image"
-        )));
+    if pull {
+        push_log(app, id, format!("docker pull {image}"));
+        let child = wsl::spawn_sh(&format!("docker pull {image} 2>&1"))?;
+        let code = wsl::stream_lines(child, |l| push_log(app, id, l)).await?;
+        if code != 0 {
+            return Err(Error::Other(format!(
+                "image pull failed ({code}); the Space may be private, gated, or have no image. Try Build locally."
+            )));
+        }
     }
 
     let inspect = wsl::sh(&format!(
@@ -357,6 +411,7 @@ pub async fn launch_model(app: AppHandle, repo: String, quant: String) -> Result
         error: None,
         log_tail: vec![],
         started_at: now(),
+        local_build: false,
     };
     insert(&state, inst.clone());
 
@@ -371,7 +426,7 @@ pub async fn launch_model(app: AppHandle, repo: String, quant: String) -> Result
 
 async fn run_model(app: &AppHandle, id: &str, tag: &str) -> Result<()> {
     push_log(app, id, format!("ollama pull {tag}"));
-    let child = wsl::spawn_sh(&format!("ollama pull {tag} 2>&1"))?;
+    let child = ollama::spawn(&app.state::<AppState>(), &["pull", tag])?;
     let mut last = String::new();
     let code = wsl::stream_lines(child, |l| {
         // Progress bars repeat the same prefix hundreds of times; keep changes only.
@@ -389,11 +444,24 @@ async fn run_model(app: &AppHandle, id: &str, tag: &str) -> Result<()> {
 
     update(app, id, |i| i.status = Status::Starting);
     push_log(app, id, "loading model into memory".into());
-    let load = format!(
-        "curl -sf -m 600 http://127.0.0.1:{OLLAMA_PORT}/api/generate -d '{{\"model\":\"{tag}\",\"keep_alive\":\"30m\"}}' >/dev/null && ollama ps | grep -F '{tag}'"
-    );
-    let o = wsl::sh(&load).await?.require("ollama load")?;
-    push_log(app, id, o.stdout.trim().to_string());
+    // Warm the model through the API (works for WSL and native Ollama alike).
+    let http = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(600))
+        .build()?;
+    let base = ollama::reachable_base()
+        .await
+        .ok_or_else(|| Error::NotReady("Ollama is not answering".into()))?;
+    http.post(format!("{base}/api/generate"))
+        .json(&serde_json::json!({ "model": tag, "keep_alive": "30m" }))
+        .send()
+        .await?
+        .error_for_status()
+        .map_err(|e| Error::Other(format!("ollama load: {e}")))?;
+    let o = ollama::run(&app.state::<AppState>(), &["ps"]).await?;
+    if let Some(line) = o.stdout.lines().find(|l| l.contains(tag)) {
+        push_log(app, id, line.trim().to_string());
+    }
     update(app, id, |i| {
         i.status = Status::Running;
         i.url = Some(format!("http://localhost:{OLLAMA_PORT}/v1"));
@@ -415,7 +483,7 @@ pub async fn stop(app: AppHandle, id: String) -> Result<()> {
         }
         Kind::Model => {
             if let Some(tag) = &inst.model_tag {
-                let _ = wsl::sh(&format!("ollama stop '{tag}' >/dev/null 2>&1")).await;
+                let _ = ollama::run(&state, &["stop", tag]).await;
             }
         }
     }
@@ -485,6 +553,7 @@ pub async fn discover(app: &AppHandle) {
                 error: None,
                 log_tail: vec![format!("adopted running container ({})", parts[3])],
                 started_at: now(),
+                local_build: false,
             },
         );
         if let Some(inst) = get(&state, &id) {
