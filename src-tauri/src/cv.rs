@@ -199,7 +199,9 @@ fn build_body(tensor: &[f32], size: u32) -> (usize, Vec<u8>) {
 /// Turn `[N,6]` rows into detections in source pixels, dropping low scores and
 /// the zero-padded rows NMS-free detectors emit.
 fn postprocess(rows: &[f32], lb: Letterbox, min_score: f32) -> Vec<Detection> {
-    rows.chunks_exact(6)
+    rows.as_chunks::<6>()
+        .0
+        .iter()
         .filter(|r| r[4] >= min_score && r[2] > r[0] && r[3] > r[1])
         .map(|r| Detection {
             label: coco_label(r[5].round() as i64).to_string(),
