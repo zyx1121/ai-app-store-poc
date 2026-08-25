@@ -80,7 +80,8 @@ The layer model this PoC is a slice of, and what a production version adds (flee
 - [x] Auto-update for the app (tauri-plugin-updater; needs a public release host)
 - [x] Hardware profile and per-vendor runtime (NVIDIA / AMD / Intel / CPU)
 - [x] Build Space images locally when the Hub has none for this GPU
-- [ ] Native ROCm / XPU builds of ComfyUI and Speaches; NPU backends
+- [x] Native ROCm / XPU ComfyUI and Vulkan whisper.cpp on AMD / Intel (code complete; verified for the download, unpack and process plumbing until an AMD or Intel box runs it)
+- [ ] NPU backends
 - [ ] Space secrets and HF token for gated repos
 - [x] Voice and vision base UIs next to Chat
 - [x] Real CV serving (KServe v2: Triton on NVIDIA, OpenVINO Model Server elsewhere) behind the Vision screen

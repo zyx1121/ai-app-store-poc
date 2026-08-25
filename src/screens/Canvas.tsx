@@ -21,7 +21,6 @@ import {
   startService,
   stopService,
   type ServiceModel,
-  type ServiceState,
   type ServiceStatus,
 } from "@/lib/api";
 import { Button } from "@/components/ui/button";
@@ -46,6 +45,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { LogTail } from "@/components/LogTail";
+import { ServiceStateBadge } from "@/components/ServiceStateBadge";
 import { cn } from "@/lib/utils";
 
 const SERVICE_ID = "comfyui";
@@ -60,36 +60,6 @@ const SIZE_OPTIONS = [
 
 const DEFAULT_STRENGTH = 0.6;
 const HISTORY_LIMIT = 12;
-
-const SERVICE_STATE_LABEL: Record<ServiceState, string> = {
-  missing: "Not installed",
-  pulling: "Pulling image",
-  starting: "Starting",
-  running: "Running",
-  stopped: "Stopped",
-  error: "Error",
-};
-
-const SERVICE_STATE_VARIANT: Record<
-  ServiceState,
-  "default" | "secondary" | "destructive" | "outline"
-> = {
-  missing: "outline",
-  pulling: "secondary",
-  starting: "secondary",
-  running: "default",
-  stopped: "outline",
-  error: "destructive",
-};
-
-function ServiceStateBadge({ state }: { state: ServiceState }) {
-  const animated = state === "pulling" || state === "starting";
-  return (
-    <Badge variant={SERVICE_STATE_VARIANT[state]} className={cn(animated && "animate-pulse")}>
-      {SERVICE_STATE_LABEL[state]}
-    </Badge>
-  );
-}
 
 type SourceImage = {
   blob: Blob;
@@ -542,6 +512,12 @@ export function Canvas() {
             {status && <Badge variant="outline">{status.backend}</Badge>}
           </CardTitle>
           <CardDescription>{status?.url ?? COMFYUI_BASE_URL}</CardDescription>
+          {status?.runtime === "native" && (
+            <p className="text-xs text-muted-foreground">
+              Official ComfyUI portable running natively on Windows ({status.backend}); the first
+              start unpacks a 1.8 GB download
+            </p>
+          )}
           {status?.backend === "cpu" && (
             <p className="text-xs text-muted-foreground">
               Running on CPU: expect about a minute per image

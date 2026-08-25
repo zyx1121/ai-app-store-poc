@@ -10,7 +10,10 @@ performs. This page is for whoever has such a machine.
 | | NVIDIA | AMD | Intel | CPU |
 |---|---|---|---|---|
 | Ollama | inside the distro (CUDA) | native Windows, standalone zip + ROCm zip | native Windows, standalone zip (Vulkan) | native Windows, standalone zip |
-| Speaches, ComfyUI, CV server | CUDA containers | CPU containers | CPU containers | CPU containers |
+| Speech to text | Speaches CUDA container | whisper.cpp native (Vulkan) | whisper.cpp native (Vulkan) | Speaches CPU container |
+| Text to speech | Speaches CUDA container | Speaches CPU container | Speaches CPU container | Speaches CPU container |
+| Images | ComfyUI CUDA container | ComfyUI portable native (ROCm) | ComfyUI portable native (XPU) | ComfyUI CPU container |
+| CV server | Triton container | OpenVINO Model Server container (CPU) | same | same |
 | Spaces | pull the Hub's image | pull, or build locally for the CPU | same | same |
 | `hardware.wsl_gpu` | true | false | false | false |
 
@@ -30,10 +33,16 @@ reliable (ollama/ollama#7969), which is why the zip is used.
 4. Browse, Models tab: run a small GGUF (any `Q4_K_M` under 5 GB). Chat with
    it. Then note what `ollama ps` reports (the verification script prints it):
    `size_vram` above zero means the GPU backend is in use.
-5. Audio: Start, download `faster-whisper-small`, record and transcribe, speak
-   a reply. Slow is expected (CPU); failing is not.
-6. Canvas: Start, download sd-turbo, generate one 512 x 512 image. Expect about
-   a minute on the CPU.
+5. Audio: Start Speaches (TTS). On AMD / Intel also download the whisper.cpp
+   model and Start it: the card must show `vulkan` and reach Running; record
+   and transcribe, then check with Task Manager (GPU tab, whisper-server.exe)
+   that the GPU is used. Speak a reply through Speaches.
+6. Canvas: Start. On AMD / Intel the first start downloads and unpacks the
+   official ComfyUI portable (1.8 GB); the card shows `rocm` or `xpu`. Download
+   sd-turbo, generate one 512 x 512 image and note the time (a CPU run on the
+   dev box takes 11 s for 2 steps; the GPU build should be well under that).
+   ComfyUI's ROCm build refuses to start on a machine without a supported
+   Radeon (RDNA 3 or newer); that is the expected failure on the wrong GPU.
 7. Vision: Start the CV server (OpenVINO Model Server on non-NVIDIA), download
    YOLOv10n, load an image, Detect. Expect boxes with scores in under a second.
 8. Browse, Apps tab: "Build locally" on a small gradio Space, for example
@@ -68,8 +77,12 @@ re-enable it afterwards with `wsl -d ai-app-store -u root --exec systemctl enabl
 ## Known limits
 
 - WSL2 exposes no AMD or Intel GPU and no NPU to containers, which is why the
-  LLM runs natively and the other services run on the CPU on those vendors.
-  GPU-accelerated speech and images on AMD / Intel are tracked in #13.
+  LLM, speech to text and image generation run natively on those vendors and
+  only text to speech and the CV server stay in CPU containers.
+- The whisper.cpp download comes from this repository's `runtimes` release.
+  While the repository is private that URL needs `AIAS_GITHUB_TOKEN` in the
+  store's environment (development only); a shipped store downloads from a
+  public host, the same constraint the updater has.
 - Ollama's ROCm backend covers RDNA 2 and newer discrete Radeon cards and the
   Ryzen AI Max integrated GPUs; other AMD parts fall back to Vulkan or the CPU.
 - NPUs are detected and shown; nothing uses them yet.

@@ -1,6 +1,7 @@
 mod build;
 mod cv;
 mod error;
+mod fetch;
 mod hardware;
 mod hf;
 mod instances;

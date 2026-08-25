@@ -63,15 +63,23 @@ the UI keys off it; the four base UIs only ever talk to `localhost` APIs.
 | | NVIDIA | AMD / Intel / CPU |
 |---|---|---|
 | LLM | Ollama inside WSL2 (CUDA) | Ollama for Windows, started headless by the store (ROCm on supported Radeon, Vulkan otherwise) |
-| Speech | Speaches CUDA container | Speaches CPU container |
-| Images | ComfyUI CUDA container | ComfyUI CPU container (slow; native ROCm / XPU builds are the next step) |
+| Speech | Speaches CUDA container | AMD / Intel: whisper.cpp (Vulkan) as a native Windows process for STT, Speaches CPU container for TTS. CPU: Speaches CPU container |
+| Images | ComfyUI CUDA container | AMD / Intel: ComfyUI's official portable build as a native Windows process (ROCm / XPU). CPU: ComfyUI CPU container |
 | Detection | Triton Inference Server container (ONNX Runtime on CUDA) | OpenVINO Model Server CPU container; same KServe v2 API and the same ONNX files |
 | Spaces | pull the Hub's CUDA image | pull, or build locally for the CPU |
 | NPU | detected and shown; not used for acceleration yet | same |
 
-WSL2 only exposes NVIDIA GPUs to containers, which is why non-NVIDIA LLM
-serving moves to a native Windows process while containers stay for the
-CPU-only services. NPUs are not visible inside WSL2 at all.
+WSL2 only exposes NVIDIA GPUs to containers, which is why on AMD and Intel
+every GPU-accelerated service (Ollama, whisper.cpp, ComfyUI) is a native
+Windows process and only CPU-bound services stay in containers. `services.rs`
+models both: a spec is either a `Container` (image, ports, volumes, command)
+or `Native` (archives to download, program, arguments); the store fetches,
+starts, health-checks and stops them the same way, and the four base UIs only
+ever see `localhost` ports. Native programs unpack into
+`%LOCALAPPDATA%\ai-app-store\services\<id>\` with the system `tar.exe`
+(zip and 7z). whisper.cpp has no upstream Vulkan Windows build, so
+`runtimes.yml` builds it and publishes `whisper-server-vulkan-x64.zip` on the
+`runtimes` release. NPUs are not visible inside WSL2 at all.
 
 ## CV serving
 

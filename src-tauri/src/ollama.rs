@@ -8,10 +8,10 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
 
-use tokio::io::AsyncWriteExt;
 use tokio::process::{Child, Command};
 
 use crate::error::{Error, Result};
+use crate::fetch;
 use crate::hardware::Vendor;
 use crate::state::AppState;
 use crate::wsl;
@@ -51,40 +51,6 @@ fn native_exe() -> Option<PathBuf> {
     })
 }
 
-/// Stream a download to `dest`, reporting every 32 MB.
-async fn download(
-    http: &reqwest::Client,
-    url: &str,
-    dest: &std::path::Path,
-    log: &mut impl FnMut(String),
-) -> Result<()> {
-    let name = dest
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_default();
-    let mut resp = http.get(url).send().await?.error_for_status()?;
-    let total = resp.content_length();
-    let part = dest.with_extension("part");
-    let mut file = tokio::fs::File::create(&part).await?;
-    let mut done: u64 = 0;
-    let mut next_report: u64 = 32 << 20;
-    while let Some(chunk) = resp.chunk().await? {
-        file.write_all(&chunk).await?;
-        done += chunk.len() as u64;
-        if done >= next_report {
-            next_report += 32 << 20;
-            log(match total {
-                Some(t) => format!("{name}: {} / {} MB", done >> 20, t >> 20),
-                None => format!("{name}: {} MB", done >> 20),
-            });
-        }
-    }
-    file.flush().await?;
-    drop(file);
-    tokio::fs::rename(&part, dest).await?;
-    Ok(())
-}
-
 /// Fetch the standalone zips for this vendor into the managed directory and
 /// unpack them with the system `tar.exe` (bsdtar reads zip). Returns the exe.
 async fn install_standalone(
@@ -102,7 +68,7 @@ async fn install_standalone(
         let url = format!("{STANDALONE_BASE}{zip}");
         let dest = dir.join(zip);
         log(format!("downloading {url}"));
-        download(http, &url, &dest, log).await?;
+        fetch::download(http, &url, &dest, log).await?;
         log(format!("unpacking {zip}"));
         wsl::run(
             "tar.exe",

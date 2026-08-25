@@ -19,6 +19,8 @@ pub struct AppState {
     pub services: Mutex<HashMap<ServiceId, ServiceStatus>>,
     /// `ollama serve` we started on Windows (non-NVIDIA machines only).
     pub native_ollama: Mutex<Option<Child>>,
+    /// Platform services running as native Windows processes (whisper.cpp, portable ComfyUI).
+    pub native_services: Mutex<HashMap<ServiceId, Child>>,
 }
 
 impl Default for AppState {
@@ -36,6 +38,7 @@ impl Default for AppState {
             discovered: Mutex::new(false),
             services: Mutex::new(HashMap::new()),
             native_ollama: Mutex::new(None),
+            native_services: Mutex::new(HashMap::new()),
         }
     }
 }

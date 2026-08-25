@@ -31,22 +31,40 @@ const VENDOR_LABEL: Record<Vendor, string> = {
 };
 
 function runtimePlan(vendor: Vendor): string[] {
-  if (vendor === "nvidia") {
-    return [
-      "LLM: Ollama in WSL (CUDA)",
-      "Speech: Speaches (CUDA)",
-      "Images: ComfyUI (CUDA)",
-      "Detection: Triton Inference Server (CUDA)",
-      "Spaces: pull CUDA images",
-    ];
+  switch (vendor) {
+    case "nvidia":
+      return [
+        "LLM: Ollama in WSL (CUDA)",
+        "Speech: Speaches (CUDA)",
+        "Images: ComfyUI (CUDA)",
+        "Detection: Triton Inference Server (CUDA)",
+        "Spaces: pull CUDA images",
+      ];
+    case "amd":
+      return [
+        "LLM: Ollama on Windows (ROCm, Vulkan fallback)",
+        "Speech: whisper.cpp on Windows (Vulkan) for STT, Speaches (CPU) for TTS",
+        "Images: ComfyUI portable on Windows (ROCm)",
+        "Detection: OpenVINO Model Server (CPU)",
+        "Spaces: pull, or build locally for CPU",
+      ];
+    case "intel":
+      return [
+        "LLM: Ollama on Windows (Vulkan)",
+        "Speech: whisper.cpp on Windows (Vulkan) for STT, Speaches (CPU) for TTS",
+        "Images: ComfyUI portable on Windows (XPU)",
+        "Detection: OpenVINO Model Server (CPU)",
+        "Spaces: pull, or build locally for CPU",
+      ];
+    case "cpu":
+      return [
+        "LLM: Ollama on Windows (CPU)",
+        "Speech: Speaches (CPU)",
+        "Images: ComfyUI (CPU, slow)",
+        "Detection: OpenVINO Model Server (CPU)",
+        "Spaces: pull, or build locally for CPU",
+      ];
   }
-  return [
-    "LLM: Ollama on Windows (ROCm / Vulkan)",
-    "Speech: Speaches (CPU)",
-    "Images: ComfyUI (CPU, slow)",
-    "Detection: OpenVINO Model Server (CPU)",
-    "Spaces: pull, or build locally for CPU",
-  ];
 }
 
 function gpuVram(gpu: Gpu): string {
