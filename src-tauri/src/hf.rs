@@ -413,21 +413,36 @@ mod tests {
 
     #[test]
     fn space_verdicts() {
+        let run = Some("RUNNING");
         assert_eq!(
-            space_compat(Some("static"), None, true).0,
+            space_compat(Some("static"), run, None, true).0,
             Compat::Incompatible
         );
         assert_eq!(
-            space_compat(Some("gradio"), Some("cpu-basic"), false).0,
+            space_compat(Some("gradio"), run, Some("cpu-basic"), false).0,
             Compat::Ready
         );
         assert_eq!(
-            space_compat(Some("gradio"), Some("zero-a10g"), true).0,
+            space_compat(Some("gradio"), run, Some("zero-a10g"), true).0,
             Compat::Maybe
         );
         assert_eq!(
-            space_compat(Some("docker"), Some("t4-small"), false).0,
+            space_compat(Some("docker"), run, Some("t4-small"), false).0,
             Compat::Incompatible
+        );
+        assert_eq!(
+            space_compat(
+                Some("gradio"),
+                Some("RUNTIME_ERROR"),
+                Some("cpu-basic"),
+                true
+            )
+            .0,
+            Compat::Incompatible
+        );
+        assert_eq!(
+            space_compat(Some("gradio"), Some("SLEEPING"), Some("cpu-basic"), true).0,
+            Compat::Ready
         );
     }
 
