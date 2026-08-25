@@ -73,7 +73,7 @@ if ($effective -eq "nvidia") {
 # ---------------------------------------------------------------------------
 # Ollama: WSL on NVIDIA, native Windows process everywhere else.
 # ---------------------------------------------------------------------------
-$wslOllamaEnabled = (Wsl "systemctl is-enabled ollama 2>/dev/null || echo absent").Trim()
+$wslOllamaEnabled = (Wsl "e=`$(systemctl is-enabled ollama 2>/dev/null); echo `${e:-absent}").Trim()
 $listeners = Get-NetTCPConnection -State Listen -LocalPort 11434 | Select-Object -ExpandProperty LocalAddress -Unique
 $nativeExe = @(
   "$env:LOCALAPPDATA\Programs\Ollama\ollama.exe",
