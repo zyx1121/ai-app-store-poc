@@ -13,6 +13,46 @@ use crate::wsl;
 /// (development only; a shipped store downloads from a public host).
 const GITHUB_TOKEN_ENV: &str = "AIAS_GITHUB_TOKEN";
 
+/// `https://github.com/{owner}/{repo}/releases/download/{tag}/{asset}` -> (owner/repo, tag, asset).
+fn parse_release_url(url: &str) -> Option<(&str, &str, &str)> {
+    let rest = url.strip_prefix("https://github.com/")?;
+    let (repo, rest) = rest.split_once("/releases/download/")?;
+    let (tag, asset) = rest.split_once('/')?;
+    (!repo.contains('/') || repo.matches('/').count() == 1)
+        .then_some((repo, tag, asset))
+        .filter(|_| !tag.is_empty() && !asset.is_empty())
+}
+
+/// Release assets of a private repository are not served from the web URL even
+/// with a token; the API asset endpoint is. Resolve it when a token is present.
+async fn github_asset_api_url(http: &reqwest::Client, url: &str, token: &str) -> Option<String> {
+    let (repo, tag, asset) = parse_release_url(url)?;
+    let release: serde_json::Value = http
+        .get(format!(
+            "https://api.github.com/repos/{repo}/releases/tags/{tag}"
+        ))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Accept", "application/vnd.github+json")
+        .send()
+        .await
+        .ok()?
+        .error_for_status()
+        .ok()?
+        .json()
+        .await
+        .ok()?;
+    let id = release
+        .get("assets")?
+        .as_array()?
+        .iter()
+        .find(|a| a.get("name").and_then(|n| n.as_str()) == Some(asset))?
+        .get("id")?
+        .as_u64()?;
+    Some(format!(
+        "https://api.github.com/repos/{repo}/releases/assets/{id}"
+    ))
+}
+
 /// Stream a download to `dest` (via `dest.part`), reporting every 32 MB.
 pub async fn download(
     http: &reqwest::Client,
@@ -24,14 +64,22 @@ pub async fn download(
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_default();
-    let mut req = http.get(url);
-    if url.starts_with("https://github.com/") || url.starts_with("https://api.github.com/") {
-        if let Ok(token) = std::env::var(GITHUB_TOKEN_ENV) {
-            if !token.trim().is_empty() {
-                req = req
-                    .header("Authorization", format!("Bearer {}", token.trim()))
-                    .header("Accept", "application/octet-stream");
+    let token = std::env::var(GITHUB_TOKEN_ENV)
+        .ok()
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty());
+    let mut url = url.to_string();
+    let mut req = http.get(&url);
+    if let Some(token) = token.as_deref() {
+        if url.starts_with("https://github.com/") || url.starts_with("https://api.github.com/") {
+            if let Some(api) = github_asset_api_url(http, &url, token).await {
+                log(format!("private release asset, using {api}"));
+                url = api;
             }
+            req = http
+                .get(&url)
+                .header("Authorization", format!("Bearer {token}"))
+                .header("Accept", "application/octet-stream");
         }
     }
     let mut resp = req
@@ -79,4 +127,29 @@ pub async fn extract(archive: &Path, into: &Path) -> Result<()> {
     .await?
     .require("tar -xf")?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_release_download_urls() {
+        assert_eq!(
+            parse_release_url(
+                "https://github.com/zyx1121/ai-app-store-poc/releases/download/runtimes/whisper-server-vulkan-x64.zip"
+            ),
+            Some(("zyx1121/ai-app-store-poc", "runtimes", "whisper-server-vulkan-x64.zip"))
+        );
+        assert_eq!(
+            parse_release_url(
+                "https://github.com/comfyanonymous/ComfyUI/releases/latest/download/x.7z"
+            ),
+            None
+        );
+        assert_eq!(
+            parse_release_url("https://huggingface.co/a/b/resolve/main/c.bin"),
+            None
+        );
+    }
 }
