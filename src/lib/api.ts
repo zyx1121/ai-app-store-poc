@@ -185,10 +185,11 @@ export const onInstanceUpdate = (cb: (i: Instance) => void): Promise<UnlistenFn>
 
 // ---------------------------------------------------------------------------
 // Platform services: extra inference servers the store runs as containers
-// inside the distro (Speaches for STT/TTS now, ComfyUI for images later).
+// inside the distro (Speaches for STT/TTS, ComfyUI for images, a KServe v2
+// CV server for detection).
 // ---------------------------------------------------------------------------
 
-export type ServiceId = "speaches" | "comfyui";
+export type ServiceId = "speaches" | "comfyui" | "cv";
 
 export type ServiceState = "missing" | "pulling" | "starting" | "running" | "stopped" | "error";
 
@@ -201,7 +202,7 @@ export type ServiceStatus = {
   url: string;
   /** the image is present locally (no pull needed on next start) */
   image_present: boolean;
-  /** which implementation this machine got: `cuda` or `cpu` */
+  /** which implementation this machine got: `cuda`, `cpu`, `triton`, `openvino` */
   backend: string;
   error: string | null;
   log_tail: string[];
@@ -218,14 +219,48 @@ export const onServiceUpdate = (cb: (s: ServiceStatus) => void): Promise<Unliste
   listen<ServiceStatus>("service://update", (ev) => cb(ev.payload));
 
 /** A model file a service needs beyond its image (e.g. a checkpoint for ComfyUI). */
-export type ServiceModel = { name: string; path: string; installed: boolean };
+export type ServiceModel = { name: string; display_name: string; path: string; installed: boolean };
 
-/** Requires the service container to be running (the probe runs inside it). */
+/**
+ * Speaches / ComfyUI: requires the service container to be running (the probe runs inside it).
+ * CV: reads the shared model store, works before the service is started.
+ */
 export const serviceModels = (id: ServiceId) => invoke<ServiceModel[]>("service_models", { id });
 
-/** Long-running download into the container; progress lines arrive on `service://update` log_tail. */
+/** Long-running download; progress lines arrive on `service://update` log_tail. */
 export const installServiceModel = (id: ServiceId, name: string) =>
   invoke<ServiceModel>("install_service_model", { id, name });
+
+// ---------------------------------------------------------------------------
+// CV (object detection). The service speaks KServe v2 (Triton on NVIDIA,
+// OpenVINO Model Server elsewhere); the Rust side is the client so the UI is
+// the same whichever server answers. Boxes come back in pixels of the image sent.
+// ---------------------------------------------------------------------------
+
+export const CV_PORT = 8900;
+
+export type CvDetection = {
+  label: string;
+  /** 0..1 confidence */
+  score: number;
+  /** x1, y1, x2, y2 in pixels of the image that was sent */
+  box: [number, number, number, number];
+};
+
+export type CvDetectResult = {
+  model: string;
+  /** which server answered: `triton` or `openvino` */
+  backend: string;
+  detections: CvDetection[];
+  inference_ms: number;
+  total_ms: number;
+};
+
+/** `image` is an encoded JPEG or PNG; `model` is a `serviceModels("cv")` name. */
+export const cvDetect = (image: Uint8Array, model: string, minScore = 0.25) =>
+  invoke<CvDetectResult>("cv_detect", image, {
+    headers: { "x-model": model, "x-min-score": String(minScore) },
+  });
 
 /** ComfyUI HTTP API (`/prompt`, `/history/{id}`, `/view`, `/upload/image`). */
 export const COMFYUI_PORT = 8188;

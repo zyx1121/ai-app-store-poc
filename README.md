@@ -82,7 +82,9 @@ The layer model this PoC is a slice of, and what a production version adds (flee
 - [x] Build Space images locally when the Hub has none for this GPU
 - [ ] Native ROCm / XPU builds of ComfyUI and Speaches; NPU backends
 - [ ] Space secrets and HF token for gated repos
-- [ ] Voice and vision base UIs next to Chat
+- [x] Voice and vision base UIs next to Chat
+- [x] Real CV serving (KServe v2: Triton on NVIDIA, OpenVINO Model Server elsewhere) behind the Vision screen
+- [ ] Segmentation, pose and OCR models on the CV server
 - [ ] Linux host support (no WSL layer)
 
 ## Contributing
