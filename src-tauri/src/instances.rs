@@ -15,6 +15,9 @@ use crate::wsl::{self, slug};
 const UPDATE_EVENT: &str = "instance://update";
 const LOG_TAIL: usize = 20;
 const CONTAINER_PREFIX: &str = "aias-";
+/// Spaces download their weights from the Hub at startup; one shared named
+/// volume means the second run of any Space (or a restart) skips the download.
+const HF_CACHE_VOLUME: &str = "aias-hf-cache";
 pub const OLLAMA_PORT: u16 = 11434;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -235,6 +238,8 @@ async fn run_space(
         "docker rm -f {cname} >/dev/null 2>&1; \
          docker run -d --name {cname} {gpu_flag} -p {port}:{app_port} \
            --label aias.kind=space --label aias.repo='{repo}' --label aias.port={port} \
+           -v {HF_CACHE_VOLUME}:/home/user/.cache/huggingface \
+           -e HF_HOME=/home/user/.cache/huggingface \
            -e PORT={app_port} -e GRADIO_SERVER_NAME=0.0.0.0 -e GRADIO_SERVER_PORT={app_port} \
            {image} {command}"
     );
