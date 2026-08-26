@@ -27,7 +27,11 @@ reliable (ollama/ollama#7969), which is why the zip is used.
 
 1. Install the MSI from the latest CI run or release and open the store.
 2. Setup: the Hardware card must show the right vendor, every GPU with VRAM,
-   any NPU, and the runtime plan for that vendor. Screenshot it.
+   any NPU, and the runtime plan for that vendor. The status list has a
+   "Virtualization (UEFI)" row: it must be green (hypervisor running, or VT
+   enabled in firmware) before provisioning can install WSL2. If it is red,
+   the card explains the UEFI toggle; that step is the one thing the store
+   cannot do for the user. Screenshot it.
 3. Click "Install". Watch the log: on non-NVIDIA machines the WSL Ollama step is
    skipped and an "Ollama runs natively on Windows" step downloads the zip.
 4. Browse, Models tab: run a small GGUF (any `Q4_K_M` under 5 GB). Chat with

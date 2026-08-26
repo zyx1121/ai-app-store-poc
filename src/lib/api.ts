@@ -24,6 +24,15 @@ export type Gpu = {
 
 export type Npu = { name: string; vendor: "intel" | "amd" | "qualcomm" | "unknown" };
 
+export type Virtualization = {
+  /** the CPU has VT-x / AMD-V */
+  vt_supported: boolean;
+  /** virtualization is enabled in the UEFI firmware (the BIOS switch) */
+  vt_firmware_enabled: boolean;
+  /** the Windows hypervisor is already running */
+  hypervisor_present: boolean;
+};
+
 export type HardwareProfile = {
   gpus: Gpu[];
   npus: Npu[];
@@ -32,6 +41,7 @@ export type HardwareProfile = {
   vendor: Vendor;
   /** only NVIDIA can be handed to WSL2 containers; other vendors run natively on Windows */
   wsl_gpu: boolean;
+  virtualization: Virtualization;
 };
 
 export type RuntimeStatus = {
@@ -51,6 +61,8 @@ export type RuntimeStatus = {
   ready: boolean;
   /** a Windows reboot is required before continuing (WSL feature just enabled) */
   reboot_required: boolean;
+  /** firmware / hypervisor state that decides whether WSL2 can run at all */
+  virtualization: Virtualization;
   hardware: HardwareProfile;
   vendor: Vendor;
   /** `vendor` was forced with the `AIAS_VENDOR` environment variable (testing another vendor's path) */

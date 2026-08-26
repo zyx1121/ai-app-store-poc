@@ -14,4 +14,15 @@ $gpus = Get-CimInstance Win32_VideoController | ForEach-Object {
 $npus = Get-PnpDevice -PresentOnly | Where-Object {
   $_.FriendlyName -match 'AI Boost|IPU Device|Hexagon|Neural Process|\bNPU\b|Ryzen AI'
 } | ForEach-Object { [pscustomobject]@{ name = $_.FriendlyName; class = $_.Class; status = $_.Status } }
-[pscustomobject]@{ gpus = @($gpus); npus = @($npus) } | ConvertTo-Json -Depth 4 -Compress
+# Virtualization: WSL2 needs the Windows hypervisor, which needs VT-x / AMD-V
+# enabled in UEFI firmware. `vt_supported` is the silicon capability,
+# `vt_firmware_enabled` the BIOS switch, `hypervisor_present` means it is already
+# running (so it is usable regardless of the other two).
+$cpu = Get-CimInstance Win32_Processor | Select-Object -First 1
+$cs = Get-CimInstance Win32_ComputerSystem
+$virt = [pscustomobject]@{
+  vt_supported        = [bool]$cpu.VMMonitorModeExtensions
+  vt_firmware_enabled = [bool]$cpu.VirtualizationFirmwareEnabled
+  hypervisor_present  = [bool]$cs.HypervisorPresent
+}
+[pscustomobject]@{ gpus = @($gpus); npus = @($npus); virtualization = $virt } | ConvertTo-Json -Depth 4 -Compress

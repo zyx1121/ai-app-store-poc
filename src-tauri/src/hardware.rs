@@ -36,6 +36,23 @@ pub struct Npu {
     pub vendor: String,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
+pub struct Virtualization {
+    /// the CPU has VT-x / AMD-V
+    pub vt_supported: bool,
+    /// virtualization is enabled in the UEFI firmware (the BIOS switch)
+    pub vt_firmware_enabled: bool,
+    /// the Windows hypervisor is already running (so WSL2 will work regardless)
+    pub hypervisor_present: bool,
+}
+
+impl Virtualization {
+    /// WSL2 can run now, or will after `wsl --install` and a reboot.
+    pub fn usable(&self) -> bool {
+        self.hypervisor_present || (self.vt_supported && self.vt_firmware_enabled)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct HardwareProfile {
     pub gpus: Vec<Gpu>,
@@ -46,6 +63,8 @@ pub struct HardwareProfile {
     pub vendor: Vendor,
     /// Windows can hand a CUDA GPU to WSL2 containers; other vendors run natively on the host.
     pub wsl_gpu: bool,
+    /// Firmware / hypervisor state that decides whether WSL2 can run at all.
+    pub virtualization: Virtualization,
 }
 
 #[derive(Deserialize)]
@@ -54,6 +73,8 @@ struct RawProbe {
     gpus: Vec<RawGpu>,
     #[serde(default)]
     npus: Vec<RawNpu>,
+    #[serde(default)]
+    virtualization: Virtualization,
 }
 
 #[derive(Deserialize)]
@@ -190,6 +211,7 @@ pub fn from_probe_json(json: &str) -> HardwareProfile {
         npus,
         primary_gpu,
         vendor,
+        virtualization: raw.virtualization,
     }
 }
 

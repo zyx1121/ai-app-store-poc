@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
 
 use crate::error::{Error, Result};
-use crate::hardware::{self, HardwareProfile, Vendor};
+use crate::hardware::{self, HardwareProfile, Vendor, Virtualization};
 use crate::ollama;
 use crate::state::AppState;
 use crate::wsl::{self, DISTRO};
@@ -30,6 +30,8 @@ pub struct RuntimeStatus {
     pub vram_mb: Option<u64>,
     pub ready: bool,
     pub reboot_required: bool,
+    /// virtualization must be enabled in UEFI firmware before WSL2 can run
+    pub virtualization: Virtualization,
     /// GPUs and NPUs on the host and the vendor the runtime is built around.
     pub hardware: HardwareProfile,
     pub vendor: Vendor,
@@ -85,6 +87,7 @@ pub async fn status() -> RuntimeStatus {
         s.vendor_forced = true;
     }
     s.vendor = s.hardware.vendor;
+    s.virtualization = s.hardware.virtualization;
     if let Some(g) = &s.hardware.primary_gpu {
         s.gpu_name = Some(g.name.clone());
         s.vram_mb = g.vram_mb;
@@ -173,6 +176,35 @@ pub async fn refresh(state: &AppState) -> RuntimeStatus {
 /// Returns early with `reboot_required` when Windows needs a restart.
 pub async fn provision(app: &AppHandle, state: &AppState) -> Result<RuntimeStatus> {
     let mut s = status().await;
+
+    // WSL2 needs the Windows hypervisor. If the CPU cannot virtualize, or VT is
+    // switched off in the UEFI firmware, `wsl --install` "succeeds" but the VM
+    // never boots. There is no reliable way to flip the firmware switch from
+    // Windows, so stop here with the one instruction the user must act on.
+    let v = s.virtualization;
+    if !s.wsl_installed && !v.usable() {
+        if !v.vt_supported {
+            emit(
+                app,
+                "virtualization",
+                "error",
+                "This CPU has no hardware virtualization (VT-x / AMD-V); WSL2 cannot run here.",
+            );
+            return Err(Error::Other(
+                "This CPU does not support hardware virtualization, which WSL2 requires.".into(),
+            ));
+        }
+        emit(
+            app,
+            "virtualization",
+            "error",
+            "Virtualization is turned off in the UEFI firmware.",
+        );
+        return Err(Error::Other(
+            "Enable virtualization (Intel VT-x / VT-d or AMD SVM) in the UEFI firmware, then reboot and try again.              On most machines: reboot, open firmware setup (Del / F2 / F10 at boot), turn on Intel Virtualization Technology (VT-x) and VT-d, save and exit."
+                .into(),
+        ));
+    }
 
     if !s.wsl_installed {
         emit(app, "wsl", "start", "Installing WSL2 (no distribution)");

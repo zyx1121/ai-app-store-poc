@@ -47,7 +47,7 @@ reason string. An `incompatible` item cannot be launched.
 
 | Piece | Implementation |
 |-------|----------------|
-| Runtime detection | `wsl.exe --status`, distro list, one probe script inside the distro (Docker, NVIDIA runtime, Ollama, GPU name and VRAM) |
+| Runtime detection | `wsl.exe --status`, distro list, one probe script inside the distro (Docker, NVIDIA runtime, Ollama, GPU name and VRAM); a host probe for firmware virtualization (WSL2 needs the hypervisor) |
 | Provisioning | `wsl --install --no-distribution`, `wsl --install -d Ubuntu-24.04 --name ai-app-store --no-launch`, then `provision.sh` over stdin, then a distro restart so systemd owns Docker and Ollama |
 | Keepalive | WSL stops a distro seconds after its last client exits; the app holds `wsl -d ai-app-store -- sleep infinity` while it runs |
 | Spaces | `docker pull registry.hf.space/<owner>-<name>:latest`, `docker run -p <free port>:<app_port> --gpus all`, poll the port until it answers; labels `aias.*` let a restarted app re-adopt containers |
