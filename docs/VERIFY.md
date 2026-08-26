@@ -89,4 +89,9 @@ re-enable it afterwards with `wsl -d ai-app-store -u root --exec systemctl enabl
   public host, the same constraint the updater has.
 - Ollama's ROCm backend covers RDNA 2 and newer discrete Radeon cards and the
   Ryzen AI Max integrated GPUs; other AMD parts fall back to Vulkan or the CPU.
+- Native Ollama is started with `OLLAMA_VULKAN=1` and `OLLAMA_IGPU_ENABLE=1`.
+  Ollama ships the Vulkan backend but leaves it off by default and drops
+  integrated GPUs; without both flags it runs on the CPU. Verified: on an Intel
+  Core Ultra 5 225H the Arc 130T iGPU takes 100% of the inference through
+  Vulkan (`ollama ps` shows `100% GPU`).
 - NPUs are detected and shown; nothing uses them yet.

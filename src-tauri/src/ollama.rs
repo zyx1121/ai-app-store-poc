@@ -124,7 +124,15 @@ fn native_env(cmd: &mut Command) {
         .env("OLLAMA_ORIGINS", "*")
         .env("OLLAMA_CONTEXT_LENGTH", "16384")
         .env("OLLAMA_FLASH_ATTENTION", "1")
-        .env("OLLAMA_KV_CACHE_TYPE", "q8_0");
+        .env("OLLAMA_KV_CACHE_TYPE", "q8_0")
+        // Native Ollama only runs on non-NVIDIA machines here, where the GPU is an
+        // AMD or Intel part reached through Vulkan. Ollama ships the Vulkan backend
+        // but leaves it off by default, and it drops integrated GPUs (the Intel Arc
+        // iGPU, AMD Radeon graphics) unless told to keep them. Without both flags it
+        // silently runs on the CPU; with them a Core Ultra's Arc iGPU takes 100% of
+        // the inference. Verified on an Intel Core Ultra 5 225H (Arc 130T).
+        .env("OLLAMA_VULKAN", "1")
+        .env("OLLAMA_IGPU_ENABLE", "1");
 }
 
 /// Run an `ollama ...` command wherever Ollama lives and wait for it.
