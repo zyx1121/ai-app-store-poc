@@ -207,19 +207,75 @@ pub async fn provision(app: &AppHandle, state: &AppState) -> Result<RuntimeStatu
     }
 
     if !s.wsl_installed {
-        emit(app, "wsl", "start", "Installing WSL2 (no distribution)");
-        let child = wsl::spawn_win("wsl.exe", &["--install", "--no-distribution"])?;
+        // Enable the two Windows features WSL2 needs, deterministically. `wsl --install`
+        // is avoided here: on a machine whose inbox WSL is stale it drops to an
+        // interactive "press a key to update WSL" prompt that a spawned process cannot
+        // answer. DISM never prompts and returns 3010 when a reboot is required.
+        emit(app, "wsl", "start", "Enabling the WSL2 Windows features");
+        let mut need_reboot = false;
+        for feature in [
+            "Microsoft-Windows-Subsystem-Linux",
+            "VirtualMachinePlatform",
+        ] {
+            let out = wsl::run(
+                "dism.exe",
+                &[
+                    "/online",
+                    "/enable-feature",
+                    &format!("/featurename:{feature}"),
+                    "/all",
+                    "/norestart",
+                ],
+            )
+            .await?;
+            emit(
+                app,
+                "wsl",
+                "log",
+                format!("{feature}: dism exit {}", out.status),
+            );
+            match out.status {
+                0 => {}
+                // 3010: the feature was enabled but Windows must restart to activate it.
+                3010 => need_reboot = true,
+                code => {
+                    emit(
+                        app,
+                        "wsl",
+                        "error",
+                        format!("enabling {feature} failed ({code})"),
+                    );
+                    return Err(Error::Other(format!(
+                        "could not enable the {feature} Windows feature (dism exit {code})"
+                    )));
+                }
+            }
+        }
+        if need_reboot {
+            s.reboot_required = true;
+            emit(
+                app,
+                "wsl",
+                "ok",
+                "WSL2 features enabled. Reboot Windows, then open this app again.",
+            );
+            return Ok(s);
+        }
+
+        // Features are on; install the modern WSL app. `--web-download` takes it from
+        // GitHub instead of the Store, so it works on machines without the Store.
+        emit(app, "wsl", "start", "Installing the WSL app");
+        let child = wsl::spawn_win("wsl.exe", &["--update", "--web-download"])?;
         let code = wsl::stream_lines(child, |l| emit(app, "wsl", "log", l)).await?;
         if code != 0 {
             emit(
                 app,
                 "wsl",
                 "error",
-                format!("wsl --install exited with {code}"),
+                format!("wsl --update exited with {code}"),
             );
             return Err(Error::Other(
-                "WSL install failed; run `wsl --install --no-distribution` in an elevated terminal"
-                    .into(),
+                "installing the WSL app failed; see log".into(),
             ));
         }
         s = status().await;
