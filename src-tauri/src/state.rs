@@ -53,6 +53,15 @@ impl AppState {
             .unwrap_or_default()
     }
 
+    /// The host has an NPU (detected in the hardware probe).
+    pub fn has_npu(&self) -> bool {
+        self.runtime
+            .lock()
+            .ok()
+            .and_then(|r| r.as_ref().map(|s| !s.hardware.npus.is_empty()))
+            .unwrap_or(false)
+    }
+
     pub fn has_gpu(&self) -> bool {
         self.runtime
             .lock()

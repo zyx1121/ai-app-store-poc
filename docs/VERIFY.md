@@ -94,4 +94,7 @@ re-enable it afterwards with `wsl -d ai-app-store -u root --exec systemctl enabl
   integrated GPUs; without both flags it runs on the CPU. Verified: on an Intel
   Core Ultra 5 225H the Arc 130T iGPU takes 100% of the inference through
   Vulkan (`ollama ps` shows `100% GPU`).
-- NPUs are detected and shown; nothing uses them yet.
+- On an Intel machine with an NPU, the CV server targets the NPU through
+  OpenVINO (`target_device: NPU`); the Vision card shows backend `openvino-npu`.
+  If the NPU cannot compile a given detector it falls back to the CPU rung. This
+  is the first NPU-backed path; other modalities still leave the NPU unused.
