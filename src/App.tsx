@@ -31,6 +31,17 @@ function App() {
   const needsSetup = status === null || !status.ready;
   const activeScreen: Route = needsSetup ? "setup" : route;
 
+  // Screens stay mounted once visited and are hidden, not unmounted, when the
+  // user navigates away: a chat transcript, a loaded image with its boxes, a
+  // generated picture all survive a round trip (issue #27).
+  const [visited, setVisited] = useState<Set<Route>>(() => new Set([activeScreen]));
+  useEffect(() => {
+    setVisited((prev) => (prev.has(activeScreen) ? prev : new Set(prev).add(activeScreen)));
+  }, [activeScreen]);
+  const mounted = (key: Route) => visited.has(key) || activeScreen === key;
+  const paneClass = (key: Route, scroll = true) =>
+    cn("h-full", scroll && "overflow-y-auto", activeScreen !== key && "hidden");
+
   function openChat(instanceId: string) {
     setChatInstanceId(instanceId);
     setRoute("chat");
@@ -69,16 +80,39 @@ function App() {
         </aside>
 
         <main className="flex min-w-0 flex-1 flex-col overflow-hidden">
-          {activeScreen === "chat" ? (
-            <Chat initialInstanceId={chatInstanceId} />
-          ) : (
-            <div className="h-full overflow-y-auto">
-              {activeScreen === "setup" && <Setup status={status} onStatusChange={setStatus} />}
-              {activeScreen === "browse" && <Browse onLaunched={() => setRoute("running")} />}
-              {activeScreen === "running" && <Running onOpenChat={openChat} />}
-              {activeScreen === "audio" && <Audio />}
-              {activeScreen === "vision" && <Vision />}
-              {activeScreen === "canvas" && <Canvas />}
+          {mounted("setup") && (
+            <div className={paneClass("setup")}>
+              <Setup status={status} onStatusChange={setStatus} />
+            </div>
+          )}
+          {mounted("browse") && (
+            <div className={paneClass("browse")}>
+              <Browse onLaunched={() => setRoute("running")} />
+            </div>
+          )}
+          {mounted("running") && (
+            <div className={paneClass("running")}>
+              <Running onOpenChat={openChat} />
+            </div>
+          )}
+          {mounted("chat") && (
+            <div className={paneClass("chat", false)}>
+              <Chat initialInstanceId={chatInstanceId} />
+            </div>
+          )}
+          {mounted("audio") && (
+            <div className={paneClass("audio")}>
+              <Audio />
+            </div>
+          )}
+          {mounted("vision") && (
+            <div className={paneClass("vision")}>
+              <Vision active={activeScreen === "vision"} />
+            </div>
+          )}
+          {mounted("canvas") && (
+            <div className={paneClass("canvas")}>
+              <Canvas />
             </div>
           )}
         </main>
