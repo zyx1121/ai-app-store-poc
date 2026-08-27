@@ -119,6 +119,27 @@ foreach ($svc in $services) {
 }
 
 # ---------------------------------------------------------------------------
+# Native Windows services must listen on loopback only (issue #22). A listener
+# on 0.0.0.0 makes Windows Defender Firewall raise its "allow this app" dialog
+# the first time the executable binds, which blocks unattended provisioning.
+# WSL-published ports arrive through wslrelay / wslhost and are not native.
+# ---------------------------------------------------------------------------
+$nativeNames = @("ollama", "ovms", "whisper-server", "python")
+$nativeListeners = Get-NetTCPConnection -State Listen -LocalPort 11434, 8188, 8881, 8900 | ForEach-Object {
+  $proc = Get-Process -Id $_.OwningProcess -ErrorAction SilentlyContinue
+  if ($proc -and ($nativeNames -contains $proc.ProcessName)) {
+    [pscustomobject]@{ proc = $proc.ProcessName; addr = $_.LocalAddress; port = $_.LocalPort }
+  }
+}
+if ($nativeListeners) {
+  $bad = @($nativeListeners | Where-Object { $_.addr -ne "127.0.0.1" -and $_.addr -ne "::1" })
+  $listing = ($nativeListeners | ForEach-Object { "$($_.proc) $($_.addr):$($_.port)" }) -join "; "
+  Add-Check ($bad.Count -eq 0) "Native services listen on loopback only" $listing
+} else {
+  Add-Check $true "Native services listen on loopback only" "no native service running (start one, then rerun)"
+}
+
+# ---------------------------------------------------------------------------
 # Local Space builds: CPU images on non-NVIDIA vendors.
 # ---------------------------------------------------------------------------
 $localImages = (Wsl "docker images --format '{{.Repository}}:{{.Tag}}' | grep '^aias-local/'").Trim()

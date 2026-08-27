@@ -305,13 +305,21 @@ const CV_OVMS_NPU: ServiceSpec = ServiceSpec {
             "ovms.zip",
         )],
         exe: "ovms\\ovms.exe",
+        // Both listeners bind loopback: OVMS defaults to 0.0.0.0, which makes Windows
+        // Defender Firewall raise its "allow this app" dialog the first time ovms.exe
+        // listens. Nothing outside this machine needs the port. Every native service
+        // in this file binds 127.0.0.1 for the same reason (see the test below).
         args: &[
             "--config_path",
             "ovms.json",
             "--rest_port",
             "8900",
+            "--rest_bind_address",
+            "127.0.0.1",
             "--port",
             "9000",
+            "--grpc_bind_address",
+            "127.0.0.1",
             "--file_system_poll_wait_seconds",
             "2",
         ],
@@ -1365,6 +1373,60 @@ mod tests {
             spec(ServiceId::Comfyui, sel(Vendor::Cpu)).unwrap().runtime,
             Runtime::Container { .. }
         ));
+    }
+
+    /// Every native Windows service must listen on loopback only. A listener on
+    /// 0.0.0.0 makes Windows Defender Firewall raise a modal "allow this app"
+    /// dialog the first time the executable binds, which breaks unattended
+    /// provisioning on a shipped machine (issue #22). Ollama is covered in
+    /// `ollama.rs` (`OLLAMA_HOST=127.0.0.1`).
+    #[test]
+    fn native_services_bind_loopback_only() {
+        let bind_flags = [
+            "--host",
+            "--listen",
+            "--rest_bind_address",
+            "--grpc_bind_address",
+        ];
+        let mut native = 0;
+        for id in [
+            ServiceId::Speaches,
+            ServiceId::Comfyui,
+            ServiceId::Cv,
+            ServiceId::Whisper,
+        ] {
+            for rung in chain(id) {
+                let Runtime::Native { args, .. } = rung.spec.runtime else {
+                    continue;
+                };
+                native += 1;
+                let binds: Vec<&str> = args
+                    .windows(2)
+                    .filter(|w| bind_flags.contains(&w[0]))
+                    .map(|w| w[1])
+                    .collect();
+                assert!(
+                    !binds.is_empty(),
+                    "{:?} ({}) has no bind address flag; it would listen on 0.0.0.0",
+                    id,
+                    rung.spec.backend
+                );
+                for b in binds {
+                    assert_eq!(
+                        b, "127.0.0.1",
+                        "{:?} ({}) binds {b}, not loopback",
+                        id, rung.spec.backend
+                    );
+                }
+            }
+        }
+        // OVMS has two listeners (REST and gRPC); both must be pinned.
+        let Runtime::Native { args, .. } = CV_OVMS_NPU.runtime else {
+            unreachable!()
+        };
+        assert!(args.contains(&"--rest_bind_address"));
+        assert!(args.contains(&"--grpc_bind_address"));
+        assert!(native >= 4, "expected whisper, two ComfyUI builds and OVMS");
     }
 
     #[test]
