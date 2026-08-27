@@ -291,6 +291,37 @@ const CV_OVMS: ServiceSpec = ServiceSpec {
     ..CV_TRITON
 };
 
+/// Intel machines with an NPU: OpenVINO Model Server as a native Windows process.
+/// WSL2 exposes no NPU device (`/dev/dxg` only, no `/dev/accel`), so the container
+/// build cannot reach it; OVMS runs natively where the NPU driver lives. Same
+/// KServe v2 API and ONNX detectors as the CPU build, but the model repo and
+/// `ovms.json` (with `target_device: NPU`) live on the Windows side, written by
+/// the store. Sits above the CPU rung; a machine with no NPU falls through to it.
+const CV_OVMS_NPU: ServiceSpec = ServiceSpec {
+    backend: "openvino-npu",
+    runtime: Runtime::Native {
+        downloads: &[(
+            "https://github.com/openvinotoolkit/model_server/releases/download/v2026.3/ovms_windows_2026.3.0_python_off.zip",
+            "ovms.zip",
+        )],
+        exe: "ovms\\ovms.exe",
+        args: &[
+            "--config_path",
+            "ovms.json",
+            "--rest_port",
+            "8900",
+            "--port",
+            "9000",
+            "--file_system_poll_wait_seconds",
+            "2",
+        ],
+        env: &[],
+        cwd: "",
+        models_required: false,
+    },
+    ..CV_OVMS
+};
+
 /// Windows-side port of the whisper.cpp server.
 pub const WHISPER_PORT: u16 = 8881;
 
@@ -343,25 +374,37 @@ const WHISPER_VULKAN: ServiceSpec = ServiceSpec {
 /// aiDAPTIV) it widens to the full `HardwareProfile`, and a device-profile rung
 /// for shipped SKUs is prepended; the ordered-chain shape here is that model.
 /// See docs/adr/0001-accelerator-adapters.md.
+/// What the resolution chain keys off. `vendor` today, plus capability flags as
+/// adapters land (the NPU flag is the first). Widening this, not adding a new
+/// selection path, is how a capability adapter plugs into the chain.
+#[derive(Clone, Copy)]
+struct Selector {
+    vendor: Vendor,
+    has_npu: bool,
+}
+
 struct Rung {
-    applies: fn(Vendor) -> bool,
+    applies: fn(Selector) -> bool,
     spec: &'static ServiceSpec,
 }
 
-const fn any(_: Vendor) -> bool {
+const fn any(_: Selector) -> bool {
     true
 }
-const fn is_nvidia(v: Vendor) -> bool {
-    matches!(v, Vendor::Nvidia)
+const fn is_nvidia(s: Selector) -> bool {
+    matches!(s.vendor, Vendor::Nvidia)
 }
-const fn is_amd(v: Vendor) -> bool {
-    matches!(v, Vendor::Amd)
+const fn is_amd(s: Selector) -> bool {
+    matches!(s.vendor, Vendor::Amd)
 }
-const fn is_intel(v: Vendor) -> bool {
-    matches!(v, Vendor::Intel)
+const fn is_intel(s: Selector) -> bool {
+    matches!(s.vendor, Vendor::Intel)
 }
-const fn amd_or_intel(v: Vendor) -> bool {
-    matches!(v, Vendor::Amd | Vendor::Intel)
+const fn amd_or_intel(s: Selector) -> bool {
+    matches!(s.vendor, Vendor::Amd | Vendor::Intel)
+}
+const fn intel_with_npu(s: Selector) -> bool {
+    matches!(s.vendor, Vendor::Intel) && s.has_npu
 }
 
 /// The resolution chain for a modality, specialised rungs first, generic last.
@@ -401,6 +444,10 @@ fn chain(id: ServiceId) -> &'static [Rung] {
                 spec: &CV_TRITON,
             },
             Rung {
+                applies: intel_with_npu,
+                spec: &CV_OVMS_NPU,
+            },
+            Rung {
                 applies: any,
                 spec: &CV_OVMS,
             },
@@ -417,17 +464,26 @@ fn chain(id: ServiceId) -> &'static [Rung] {
 
 /// The implementation of a service for this machine, the first rung of the
 /// modality's chain that applies, or `None` when the chain has no fallback here.
-fn spec(id: ServiceId, vendor: Vendor) -> Option<&'static ServiceSpec> {
+fn spec(id: ServiceId, sel: Selector) -> Option<&'static ServiceSpec> {
     chain(id)
         .iter()
-        .find(|rung| (rung.applies)(vendor))
+        .find(|rung| (rung.applies)(sel))
         .map(|rung| rung.spec)
 }
 
-fn require_spec(id: ServiceId, vendor: Vendor) -> Result<&'static ServiceSpec> {
-    spec(id, vendor).ok_or_else(|| {
+/// The selector for the current machine.
+fn selector(state: &AppState) -> Selector {
+    Selector {
+        vendor: state.vendor(),
+        has_npu: state.has_npu(),
+    }
+}
+
+fn require_spec(id: ServiceId, sel: Selector) -> Result<&'static ServiceSpec> {
+    spec(id, sel).ok_or_else(|| {
         Error::Other(format!(
-            "{id:?} has no implementation for {vendor:?} on this machine"
+            "{id:?} has no implementation for {:?} on this machine",
+            sel.vendor
         ))
     })
 }
@@ -478,16 +534,60 @@ fn model_files(s: &ServiceSpec) -> Vec<(String, String, String)> {
         .map(|(n, u, p)| (n.to_string(), u.to_string(), p.to_string()))
         .collect();
     if s.id == ServiceId::Cv {
-        let (_, mount) = CV_STORE;
-        out.extend(cv::DETECTORS.iter().map(|d| {
-            (
-                d.name.to_string(),
-                d.url.to_string(),
-                format!("{mount}/repo/{}/1/model.onnx", d.name),
-            )
-        }));
+        match s.runtime {
+            // Native OVMS keeps its model repo on the Windows side, relative to the
+            // install dir; the container build keeps it in the shared distro volume.
+            Runtime::Native { .. } => out.extend(cv::DETECTORS.iter().map(|d| {
+                (
+                    d.name.to_string(),
+                    d.url.to_string(),
+                    format!("models\\repo\\{}\\1\\model.onnx", d.name),
+                )
+            })),
+            Runtime::Container { .. } => {
+                let (_, mount) = CV_STORE;
+                out.extend(cv::DETECTORS.iter().map(|d| {
+                    (
+                        d.name.to_string(),
+                        d.url.to_string(),
+                        format!("{mount}/repo/{}/1/model.onnx", d.name),
+                    )
+                }));
+            }
+        }
     }
     out
+}
+
+/// Write `ovms.json` for a native OVMS install: every detector whose ONNX is
+/// present, with an absolute forward-slash base_path and this spec's target
+/// device. OVMS re-reads it on its file poll, so it works before or during a run.
+async fn write_native_cv_config(id: ServiceId, s: &ServiceSpec) -> Result<()> {
+    let dir = native_dir(id)?;
+    let target = ov_target_device(s);
+    let mut items: Vec<String> = Vec::new();
+    for d in cv::DETECTORS {
+        let onnx = dir.join(format!("models\\repo\\{}\\1\\model.onnx", d.name));
+        let present = tokio::fs::metadata(&onnx)
+            .await
+            .map(|m| m.len() > 0)
+            .unwrap_or(false);
+        if !present {
+            continue;
+        }
+        let base = dir
+            .join(format!("models\\repo\\{}", d.name))
+            .to_string_lossy()
+            .replace('\\', "/");
+        items.push(format!(
+            r#"{{"config":{{"name":"{}","base_path":"{}","target_device":"{}"}}}}"#,
+            d.name, base, target
+        ));
+    }
+    let json = format!(r#"{{"model_config_list":[{}]}}"#, items.join(","));
+    tokio::fs::create_dir_all(&dir).await?;
+    tokio::fs::write(dir.join("ovms.json"), json).await?;
+    Ok(())
 }
 
 fn display_name(id: ServiceId, name: &str) -> String {
@@ -518,23 +618,32 @@ fn store_relative(mount: &str, container_path: &str) -> String {
 
 /// Regenerate the files a server reads to learn which models exist. Triton lists the
 /// repository itself; OpenVINO Model Server wants an explicit `ovms.json`.
-fn store_index_script() -> String {
+fn store_index_script(target: &str) -> String {
     let (volume, _) = CV_STORE;
     format!(
         "{prelude} mkdir -p \"$mp/repo\"; \
          {{ printf '{{\"model_config_list\":['; first=1; \
            for d in \"$mp\"/repo/*/; do n=$(basename \"$d\"); [ -s \"$d/1/model.onnx\" ] || continue; \
              [ $first = 1 ] || printf ','; first=0; \
-             printf '{{\"config\":{{\"name\":\"%s\",\"base_path\":\"/models/repo/%s\"}}}}' \"$n\" \"$n\"; \
+             printf '{{\"config\":{{\"name\":\"%s\",\"base_path\":\"/models/repo/%s\",\"target_device\":\"{target}\"}}}}' \"$n\" \"$n\"; \
            done; printf ']}}\\n'; }} > \"$mp/ovms.json.tmp\" && mv \"$mp/ovms.json.tmp\" \"$mp/ovms.json\"; \
          chmod -R a+rX \"$mp\"",
         prelude = store_prelude(volume)
     )
 }
 
+/// The OpenVINO device the CV server should target for a spec (only OVMS reads it).
+fn ov_target_device(spec: &ServiceSpec) -> &'static str {
+    if spec.backend == "openvino-npu" {
+        "NPU"
+    } else {
+        "CPU"
+    }
+}
+
 /// Name of the implementation this machine gets for a service, without probing it.
 pub fn backend_name(app: &AppHandle, id: ServiceId) -> String {
-    spec(id, app.state::<AppState>().vendor())
+    spec(id, selector(&app.state::<AppState>()))
         .map(|s| s.backend.to_string())
         .unwrap_or_else(|| "none".into())
 }
@@ -582,7 +691,7 @@ async fn model_installed(s: &ServiceSpec, id: ServiceId, path: &str) -> bool {
 }
 
 pub async fn models(app: &AppHandle, id: ServiceId) -> Result<Vec<ServiceModel>> {
-    let s = require_spec(id, app.state::<AppState>().vendor())?;
+    let s = require_spec(id, selector(&app.state::<AppState>()))?;
     let mut out = Vec::new();
     for (name, _url, path) in model_files(s) {
         let installed = model_installed(s, id, &path).await;
@@ -602,7 +711,7 @@ pub async fn models(app: &AppHandle, id: ServiceId) -> Result<Vec<ServiceModel>>
 /// through `docker exec`.
 pub async fn install_model(app: AppHandle, id: ServiceId, name: String) -> Result<ServiceModel> {
     let state = app.state::<AppState>();
-    let s = require_spec(id, state.vendor())?;
+    let s = require_spec(id, selector(&state))?;
     let Some((_, url, path)) = model_files(s).into_iter().find(|(n, _, _)| *n == name) else {
         return Err(Error::Other(format!(
             "`{name}` is not a known model for {id:?}"
@@ -615,6 +724,11 @@ pub async fn install_model(app: AppHandle, id: ServiceId, name: String) -> Resul
             let http = state.http.clone();
             let app2 = app.clone();
             fetch::download(&http, &url, &dest, &mut |l| push_log(&app2, id, l)).await?;
+            // A native CV server (OVMS) reads its model list from ovms.json; refresh it
+            // so a running server picks the new detector up on its file poll.
+            if id == ServiceId::Cv {
+                write_native_cv_config(id, s).await?;
+            }
         }
         Runtime::Container {
             model_store,
@@ -627,7 +741,7 @@ pub async fn install_model(app: AppHandle, id: ServiceId, name: String) -> Resul
                      curl -L --fail --progress-bar -o \"$f.part\" {url} 2>&1 && mv \"$f.part\" \"$f\" && {index}",
                     prelude = store_prelude(volume),
                     rel = store_relative(mount, &path),
-                    index = store_index_script(),
+                    index = store_index_script(ov_target_device(s)),
                 ),
                 None => format!(
                     "docker exec {container} sh -c 'mkdir -p \"$(dirname {path})\" && curl -L --fail --progress-bar -o {path}.part {url} 2>&1 && mv {path}.part {path}' 2>&1"
@@ -680,13 +794,13 @@ fn get(state: &AppState, id: ServiceId) -> Option<ServiceStatus> {
 
 fn update(app: &AppHandle, id: ServiceId, f: impl FnOnce(&mut ServiceStatus)) {
     let state = app.state::<AppState>();
-    let vendor = state.vendor();
+    let sel = selector(&state);
     let snapshot = {
         let mut map = match state.services.lock() {
             Ok(m) => m,
             Err(_) => return,
         };
-        let entry = map.entry(id).or_insert_with(|| match spec(id, vendor) {
+        let entry = map.entry(id).or_insert_with(|| match spec(id, sel) {
             Some(s) => base_status(s),
             None => unavailable(id),
         });
@@ -747,7 +861,7 @@ fn native_child_alive(state: &AppState, id: ServiceId) -> bool {
 /// Probe the real state and store it; the UI's `service_status` command.
 pub async fn status(app: &AppHandle, id: ServiceId) -> Result<ServiceStatus> {
     let state = app.state::<AppState>();
-    let Some(s) = spec(id, state.vendor()) else {
+    let Some(s) = spec(id, selector(&state)) else {
         let st = unavailable(id);
         if let Ok(mut m) = state.services.lock() {
             m.insert(id, st.clone());
@@ -813,7 +927,7 @@ pub async fn start(app: AppHandle, id: ServiceId) -> Result<ServiceStatus> {
     if !state.is_ready() {
         return Err(Error::NotReady("install the runtime first".into()));
     }
-    let s = require_spec(id, state.vendor())?;
+    let s = require_spec(id, selector(&state))?;
     let current = status(&app, id).await?;
     if matches!(
         current.state,
@@ -926,7 +1040,7 @@ async fn run_container(app: &AppHandle, s: &ServiceSpec, gpu: bool) -> Result<()
 
     if model_store.is_some() {
         // The server must find a valid (possibly empty) index on its first start.
-        wsl::sh(&store_index_script())
+        wsl::sh(&store_index_script(ov_target_device(s)))
             .await?
             .require("prepare model store")?;
     }
@@ -1007,6 +1121,12 @@ async fn run_native(app: &AppHandle, s: &ServiceSpec) -> Result<()> {
             st.image_present = true;
             st.state = ServiceState::Starting;
         });
+    }
+
+    // A native OVMS server needs a valid ovms.json before it starts; write it from
+    // whatever detectors are installed (an empty list is valid and hot-fills later).
+    if id == ServiceId::Cv {
+        write_native_cv_config(id, s).await?;
     }
 
     // Anything already listening on our port (a server left over from an earlier
@@ -1096,7 +1216,7 @@ async fn stop_native_process(state: &AppState, id: ServiceId, port: u16) {
 
 pub async fn stop(app: AppHandle, id: ServiceId) -> Result<()> {
     let state = app.state::<AppState>();
-    let s = require_spec(id, state.vendor())?;
+    let s = require_spec(id, selector(&state))?;
     match s.runtime {
         Runtime::Container { container, .. } => {
             let _ = wsl::sh(&format!("docker rm -f {container} >/dev/null 2>&1")).await;
@@ -1118,12 +1238,25 @@ pub async fn stop(app: AppHandle, id: ServiceId) -> Result<()> {
 mod tests {
     use super::*;
 
+    fn sel(v: Vendor) -> Selector {
+        Selector {
+            vendor: v,
+            has_npu: false,
+        }
+    }
+    fn sel_npu(v: Vendor) -> Selector {
+        Selector {
+            vendor: v,
+            has_npu: true,
+        }
+    }
+
     #[test]
     fn every_vendor_gets_the_same_ports_per_service() {
         for id in [ServiceId::Speaches, ServiceId::Comfyui, ServiceId::Cv] {
             let ports: Vec<u16> = [Vendor::Nvidia, Vendor::Amd, Vendor::Intel, Vendor::Cpu]
                 .into_iter()
-                .filter_map(|v| spec(id, v))
+                .filter_map(|v| spec(id, sel(v)))
                 .map(|s| s.host_port)
                 .collect();
             assert_eq!(ports.len(), 4, "{id:?} missing a vendor");
@@ -1136,15 +1269,47 @@ mod tests {
 
     #[test]
     fn whisper_only_where_speaches_cannot_use_the_gpu() {
-        assert!(spec(ServiceId::Whisper, Vendor::Nvidia).is_none());
-        assert!(spec(ServiceId::Whisper, Vendor::Cpu).is_none());
+        assert!(spec(ServiceId::Whisper, sel(Vendor::Nvidia)).is_none());
+        assert!(spec(ServiceId::Whisper, sel(Vendor::Cpu)).is_none());
         assert_eq!(
-            spec(ServiceId::Whisper, Vendor::Amd).unwrap().backend,
+            spec(ServiceId::Whisper, sel(Vendor::Amd)).unwrap().backend,
             "vulkan"
         );
         assert_eq!(
-            spec(ServiceId::Whisper, Vendor::Intel).unwrap().backend,
+            spec(ServiceId::Whisper, sel(Vendor::Intel))
+                .unwrap()
+                .backend,
             "vulkan"
+        );
+    }
+
+    #[test]
+    fn intel_npu_routes_cv_to_openvino_npu() {
+        // Intel + NPU picks the NPU rung; Intel without NPU and other vendors do not.
+        assert_eq!(
+            spec(ServiceId::Cv, sel_npu(Vendor::Intel)).unwrap().backend,
+            "openvino-npu"
+        );
+        assert_eq!(
+            spec(ServiceId::Cv, sel(Vendor::Intel)).unwrap().backend,
+            "openvino"
+        );
+        assert_eq!(
+            spec(ServiceId::Cv, sel_npu(Vendor::Amd)).unwrap().backend,
+            "openvino"
+        );
+        assert_eq!(
+            spec(ServiceId::Cv, sel_npu(Vendor::Nvidia))
+                .unwrap()
+                .backend,
+            "triton"
+        );
+        // The NPU spec still serves the same port and API as the CPU one.
+        assert_eq!(
+            spec(ServiceId::Cv, sel_npu(Vendor::Intel))
+                .unwrap()
+                .host_port,
+            spec(ServiceId::Cv, sel(Vendor::Intel)).unwrap().host_port
         );
     }
 
@@ -1154,14 +1319,14 @@ mod tests {
         // generic one (SPEACHES_CPU / COMFYUI_CPU / CV_OVMS), reached by cpu.
         for id in [ServiceId::Speaches, ServiceId::Comfyui, ServiceId::Cv] {
             for v in [Vendor::Nvidia, Vendor::Amd, Vendor::Intel, Vendor::Cpu] {
-                assert!(spec(id, v).is_some(), "{id:?} has no rung for {v:?}");
+                assert!(spec(id, sel(v)).is_some(), "{id:?} has no rung for {v:?}");
             }
         }
         // Whisper is specialised-only: it resolves on AMD/Intel and nowhere else.
-        assert!(spec(ServiceId::Whisper, Vendor::Amd).is_some());
-        assert!(spec(ServiceId::Whisper, Vendor::Intel).is_some());
-        assert!(spec(ServiceId::Whisper, Vendor::Nvidia).is_none());
-        assert!(spec(ServiceId::Whisper, Vendor::Cpu).is_none());
+        assert!(spec(ServiceId::Whisper, sel(Vendor::Amd)).is_some());
+        assert!(spec(ServiceId::Whisper, sel(Vendor::Intel)).is_some());
+        assert!(spec(ServiceId::Whisper, sel(Vendor::Nvidia)).is_none());
+        assert!(spec(ServiceId::Whisper, sel(Vendor::Cpu)).is_none());
     }
 
     #[test]
@@ -1171,10 +1336,10 @@ mod tests {
         for id in [ServiceId::Speaches, ServiceId::Comfyui, ServiceId::Cv] {
             let rungs = chain(id);
             let generic = rungs.iter().position(|r| {
-                (r.applies)(Vendor::Nvidia)
-                    && (r.applies)(Vendor::Amd)
-                    && (r.applies)(Vendor::Intel)
-                    && (r.applies)(Vendor::Cpu)
+                (r.applies)(sel(Vendor::Nvidia))
+                    && (r.applies)(sel(Vendor::Amd))
+                    && (r.applies)(sel(Vendor::Intel))
+                    && (r.applies)(sel(Vendor::Cpu))
             });
             assert_eq!(
                 generic,
@@ -1187,15 +1352,17 @@ mod tests {
     #[test]
     fn non_nvidia_comfyui_runs_natively_on_a_gpu_vendor() {
         assert!(matches!(
-            spec(ServiceId::Comfyui, Vendor::Amd).unwrap().runtime,
+            spec(ServiceId::Comfyui, sel(Vendor::Amd)).unwrap().runtime,
             Runtime::Native { .. }
         ));
         assert!(matches!(
-            spec(ServiceId::Comfyui, Vendor::Intel).unwrap().runtime,
+            spec(ServiceId::Comfyui, sel(Vendor::Intel))
+                .unwrap()
+                .runtime,
             Runtime::Native { .. }
         ));
         assert!(matches!(
-            spec(ServiceId::Comfyui, Vendor::Cpu).unwrap().runtime,
+            spec(ServiceId::Comfyui, sel(Vendor::Cpu)).unwrap().runtime,
             Runtime::Container { .. }
         ));
     }

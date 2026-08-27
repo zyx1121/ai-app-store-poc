@@ -94,4 +94,9 @@ re-enable it afterwards with `wsl -d ai-app-store -u root --exec systemctl enabl
   integrated GPUs; without both flags it runs on the CPU. Verified: on an Intel
   Core Ultra 5 225H the Arc 130T iGPU takes 100% of the inference through
   Vulkan (`ollama ps` shows `100% GPU`).
-- NPUs are detected and shown; nothing uses them yet.
+- On an Intel machine with an NPU, the CV server runs as a native Windows OVMS
+  process targeting the NPU (`target_device: NPU`); the Vision card shows backend
+  `openvino-npu`, runtime native. It is native because WSL2 exposes no NPU to
+  containers (only `/dev/dxg`, no `/dev/accel`). Verified on a Core Ultra 5 225H:
+  OVMS loads YOLOv10n on the NPU (model state AVAILABLE, target device NPU). This
+  is the first NPU-backed path; other modalities still leave the NPU unused.

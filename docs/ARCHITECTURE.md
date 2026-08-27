@@ -65,7 +65,7 @@ the UI keys off it; the four base UIs only ever talk to `localhost` APIs.
 | LLM | Ollama inside WSL2 (CUDA) | Ollama for Windows, started headless by the store (ROCm on supported Radeon, Vulkan otherwise) |
 | Speech | Speaches CUDA container | AMD / Intel: whisper.cpp (Vulkan) as a native Windows process for STT, Speaches CPU container for TTS. CPU: Speaches CPU container |
 | Images | ComfyUI CUDA container | AMD / Intel: ComfyUI's official portable build as a native Windows process (ROCm / XPU). CPU: ComfyUI CPU container |
-| Detection | Triton Inference Server container (ONNX Runtime on CUDA) | OpenVINO Model Server CPU container; same KServe v2 API and the same ONNX files |
+| Detection | Triton Inference Server container (ONNX Runtime on CUDA) | OpenVINO Model Server; same KServe v2 API and ONNX files. Intel with an NPU: OVMS as a native Windows process targeting the NPU (`target_device: NPU`), because WSL2 exposes no NPU to containers. Otherwise: the CPU in a container |
 | Spaces | pull the Hub's CUDA image | pull, or build locally for the CPU |
 | NPU | detected and shown; not used for acceleration yet | same |
 
