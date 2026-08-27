@@ -88,6 +88,19 @@ pub async fn wsl(args: &[&str]) -> Result<Output> {
     run("wsl.exe", args).await
 }
 
+/// Single-quote `s` for bash so it can be spliced into an `sh()` script verbatim.
+/// Anything that came from the network (Space card fields, model tags) must go
+/// through here before it touches a shell string.
+pub fn quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// `docker run -p` flag that publishes on loopback only. WSL2's port relay still
+/// exposes it to Windows `localhost`, but nothing on the LAN can reach it.
+pub fn publish(host_port: u16, container_port: u16) -> String {
+    format!("-p 127.0.0.1:{host_port}:{container_port}")
+}
+
 /// Run a shell snippet inside our distro as root and wait for it.
 ///
 /// `--exec` matters: with `--`, wsl.exe hands the command to the default shell
@@ -203,6 +216,19 @@ pub fn slug(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quote_neutralises_shell_metacharacters() {
+        assert_eq!(quote("app.py"), "'app.py'");
+        assert_eq!(quote("a'b"), "'a'\\''b'");
+        let hostile = "app.py\n`id`;$(rm -rf ~)";
+        assert_eq!(quote(hostile), format!("'{hostile}'"));
+    }
+
+    #[test]
+    fn publish_binds_loopback() {
+        assert_eq!(publish(8880, 8000), "-p 127.0.0.1:8880:8000");
+    }
 
     #[test]
     fn slug_is_container_safe() {

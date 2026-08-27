@@ -1114,17 +1114,13 @@ async fn run_container(app: &AppHandle, s: &ServiceSpec, gpu: bool) -> Result<()
         .map(|(name, path)| format!("-v {name}:{path}"))
         .collect::<Vec<_>>()
         .join(" ");
+    let publish = wsl::publish(s.host_port, container_port);
     let run = format!(
         "docker rm -f {container} >/dev/null 2>&1; \
          docker run -d --name {container} --restart unless-stopped {gpu_flag} \
-           -p {hp}:{container_port} {env} {volumes} --label aias.kind=service {image} {cmd}",
-        hp = s.host_port,
+           {publish} {env} {volumes} --label aias.kind=service {image} {cmd}",
     );
-    push_log(
-        app,
-        id,
-        format!("docker run -p {}:{container_port} {image}", s.host_port),
-    );
+    push_log(app, id, format!("docker run {publish} {image}"));
     wsl::sh(&run).await?.require("docker run")?;
 
     wait_healthy(app, s, 90, || async {

