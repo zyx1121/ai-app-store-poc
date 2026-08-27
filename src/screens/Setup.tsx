@@ -135,6 +135,22 @@ function HardwareCard({
       <p className="text-xs text-muted-foreground">
         GPU visible to WSL2: {hardware.wsl_gpu ? "yes" : "no"}
       </p>
+
+      {(() => {
+        const v = hardware.virtualization;
+        const usable = v.hypervisor_present || (v.vt_supported && v.vt_firmware_enabled);
+        if (usable) return null;
+        const msg = !v.vt_supported
+          ? "This CPU has no hardware virtualization (VT-x / AMD-V), which WSL2 requires."
+          : "Virtualization is turned off in the UEFI firmware. Reboot into firmware setup (Del / F2 / F10), turn on Intel Virtualization Technology (VT-x) and VT-d, or AMD SVM, then save and reboot.";
+        return (
+          <Alert variant="destructive">
+            <TriangleAlert />
+            <AlertTitle>Virtualization must be enabled first</AlertTitle>
+            <AlertDescription>{msg}</AlertDescription>
+          </Alert>
+        );
+      })()}
     </div>
   );
 }
@@ -255,6 +271,18 @@ function rows(status: RuntimeStatus): Row[] {
     {
       label: "Runtime distro",
       ok: status.distro_present && status.distro_running,
+    },
+    {
+      label: "Virtualization (UEFI)",
+      ok: status.virtualization.hypervisor_present ||
+        (status.virtualization.vt_supported && status.virtualization.vt_firmware_enabled),
+      detail: status.virtualization.hypervisor_present
+        ? "hypervisor running"
+        : !status.virtualization.vt_supported
+          ? "not supported by this CPU"
+          : status.virtualization.vt_firmware_enabled
+            ? "enabled"
+            : "turned off in firmware",
     },
     { label: "Docker", ok: status.docker_ok },
     {
