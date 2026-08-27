@@ -207,6 +207,10 @@ const COMFYUI_PORTABLE_ARGS: &[&str] = &[
     "8188",
     "--enable-cors-header",
 ];
+/// The embedded Python encodes a redirected stderr in the console code page (cp950
+/// on a zh-TW machine), so tqdm's block characters arrived as non-UTF-8 bytes;
+/// force UTF-8 so the log stays readable whatever the locale.
+const COMFYUI_PORTABLE_ENV: &[(&str, &str)] = &[("PYTHONUTF8", "1"), ("PYTHONIOENCODING", "utf-8")];
 const COMFYUI_PORTABLE_MODELS: &[(&str, &str, &str)] = &[(
     "sd-turbo",
     "https://huggingface.co/stabilityai/sd-turbo/resolve/main/sd_turbo.safetensors",
@@ -223,7 +227,7 @@ const COMFYUI_ROCM: ServiceSpec = ServiceSpec {
         )],
         exe: "ComfyUI_windows_portable\\python_embeded\\python.exe",
         args: COMFYUI_PORTABLE_ARGS,
-        env: &[],
+        env: COMFYUI_PORTABLE_ENV,
         cwd: "ComfyUI_windows_portable",
         models_required: false,
     },
@@ -240,7 +244,7 @@ const COMFYUI_XPU: ServiceSpec = ServiceSpec {
         )],
         exe: "ComfyUI_windows_portable\\python_embeded\\python.exe",
         args: COMFYUI_PORTABLE_ARGS,
-        env: &[],
+        env: COMFYUI_PORTABLE_ENV,
         cwd: "ComfyUI_windows_portable",
         models_required: false,
     },
@@ -1223,11 +1227,22 @@ async fn run_native(app: &AppHandle, s: &ServiceSpec) -> Result<()> {
     {
         let app = app.clone();
         tokio::spawn(async move {
-            let mut lines = BufReader::new(reader).lines();
-            while let Ok(Some(l)) = lines.next_line().await {
-                let l = l.trim_end().to_string();
-                if !l.is_empty() {
-                    push_log(&app, id, l);
+            // Read raw bytes and decode lossily: `lines()` fails on the first byte
+            // that is not UTF-8 (the embedded Python printing tqdm's block characters
+            // in the console code page), the task would end, the pipe would close and
+            // every later write to stderr in the service would fail with EINVAL. That
+            // is how ComfyUI's second generation on the Intel laptop died.
+            let mut reader = BufReader::new(reader);
+            let mut buf = Vec::new();
+            loop {
+                buf.clear();
+                match reader.read_until(b'\n', &mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {
+                        if let Some(l) = log_line(&buf) {
+                            push_log(&app, id, l);
+                        }
+                    }
                 }
             }
         });
@@ -1238,6 +1253,14 @@ async fn run_native(app: &AppHandle, s: &ServiceSpec) -> Result<()> {
 
     // Portable ComfyUI unpacks and imports a lot on first start; allow six minutes.
     wait_healthy(app, s, 180, || async { native_child_alive(&state, id) }).await
+}
+
+/// One log line from raw process output: lossy UTF-8, and for a progress bar
+/// that redraws with `\r` only the last frame.
+fn log_line(bytes: &[u8]) -> Option<String> {
+    let text = String::from_utf8_lossy(bytes);
+    let last = text.trim_end().rsplit('\r').next().unwrap_or("").trim();
+    (!last.is_empty()).then(|| last.to_string())
 }
 
 /// Kill the native process we own, or whatever still listens on the port.
@@ -1473,6 +1496,28 @@ mod tests {
         assert!(args.contains(&"--rest_bind_address"));
         assert!(args.contains(&"--grpc_bind_address"));
         assert!(native >= 4, "expected whisper, two ComfyUI builds and OVMS");
+    }
+
+    #[test]
+    fn log_lines_survive_bad_bytes_and_keep_the_last_progress_frame() {
+        // cp950-encoded block character, not UTF-8: must not break the reader.
+        assert_eq!(
+            log_line(b"loading \xa2\x60 50%\n").unwrap(),
+            "loading \u{fffd}` 50%"
+        );
+        assert_eq!(log_line(b"10%\r20%\r30%\n").unwrap(), "30%");
+        assert_eq!(log_line(b"\r\n"), None);
+        assert_eq!(log_line(b"healthy\n").unwrap(), "healthy");
+    }
+
+    #[test]
+    fn portable_comfyui_forces_utf8_python_io() {
+        for s in [&COMFYUI_ROCM, &COMFYUI_XPU] {
+            let Runtime::Native { env, .. } = s.runtime else {
+                unreachable!()
+            };
+            assert!(env.contains(&("PYTHONUTF8", "1")), "{}", s.backend);
+        }
     }
 
     #[test]
