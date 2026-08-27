@@ -189,7 +189,11 @@ async fn comfyui_memory() -> Option<(u64, Option<u64>)> {
         .await
         .ok()?;
     let dev = stats.devices.first()?;
-    let used = (dev.vram_total > 0).then(|| (dev.vram_total - dev.vram_free) / MB);
+    // On XPU (Intel) ComfyUI reports the device as fully free while models are
+    // loaded; a zero is "unknown", not "empty".
+    let used = (dev.vram_total > 0 && dev.vram_total > dev.vram_free)
+        .then(|| (dev.vram_total - dev.vram_free) / MB)
+        .filter(|u| *u > 0);
     Some((dev.torch_vram_total / MB, used))
 }
 
@@ -267,6 +271,10 @@ pub async fn memory(app: &AppHandle) -> GpuMemory {
     if vendor == Vendor::Nvidia {
         used_mb = nvidia_used_mb().await.or(used_mb);
     }
+    // Whatever a runtime reports, the device holds at least what the residents
+    // account for; without nvidia-smi (Vulkan / XPU) this sum is the only figure.
+    let known: u64 = residents.iter().filter_map(|r| r.vram_mb).sum();
+    let used_mb = Some(used_mb.unwrap_or(0).max(known)).filter(|u| *u > 0);
     GpuMemory {
         budget_mb,
         used_mb,
