@@ -135,7 +135,8 @@ function parseDetections(text: string): Detection[] {
     .map((o) => ({ label: o.label, box: o.box }));
 }
 
-export function Vision() {
+/** `active`: the screen is the one on view. Hidden screens stay mounted, so the camera pauses on hide. */
+export function Vision({ active = true }: { active?: boolean }) {
   const [instances, setInstances] = useState<Instance[]>([]);
   const [launching, setLaunching] = useState(false);
   const [launchError, setLaunchError] = useState<string | null>(null);
@@ -363,7 +364,7 @@ export function Vision() {
   }, [redrawOverlay]);
 
   useEffect(() => {
-    if (sourceTab !== "camera" || !ready) {
+    if (sourceTab !== "camera" || !ready || !active) {
       streamRef.current?.getTracks().forEach((t) => t.stop());
       streamRef.current = null;
       return;
@@ -386,7 +387,7 @@ export function Vision() {
       streamRef.current?.getTracks().forEach((t) => t.stop());
       streamRef.current = null;
     };
-  }, [sourceTab, ready]);
+  }, [sourceTab, ready, active]);
 
   useEffect(() => {
     if (sourceTab !== "image") return;

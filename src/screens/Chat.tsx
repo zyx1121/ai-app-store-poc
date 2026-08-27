@@ -165,6 +165,12 @@ export function Chat({ initialInstanceId }: { initialInstanceId?: string }) {
   const [instances, setInstances] = useState<Instance[]>([]);
   const [selectedId, setSelectedId] = useState<string | undefined>(initialInstanceId);
 
+  // Running hands off a model while this screen may already be mounted (screens
+  // stay mounted across navigation); follow the new choice, keep the transcript.
+  useEffect(() => {
+    if (initialInstanceId) setSelectedId(initialInstanceId);
+  }, [initialInstanceId]);
+
   useEffect(() => {
     let cancelled = false;
     listInstances().then((res) => {
