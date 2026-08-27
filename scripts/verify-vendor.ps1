@@ -51,7 +51,8 @@ $forced = $env:AIAS_VENDOR
 $effective = if ($forced) { $forced.ToLower() } else { $primaryVendor }
 
 $gpuList = ($gpus | ForEach-Object { "$($_.name) [$($_.vendor)] driver $($_.driver)" }) -join "; "
-Add-Check ($gpus.Count -gt 0 -or $effective -eq "cpu") "GPUs detected" $gpuList
+# A single GPU comes back as one object, not an array; @() makes .Count reliable.
+Add-Check (@($gpus).Count -gt 0 -or $effective -eq "cpu") "GPUs detected" $gpuList
 Add-Check $true "NPUs detected" $(if ($npus) { $npus -join "; " } else { "none" })
 $vendorOk = if ($Expect) { $effective -eq $Expect.ToLower() } else { $true }
 Add-Check $vendorOk "Vendor the runtime is built around" ("{0}{1}" -f $effective, $(if ($forced) { " (forced via AIAS_VENDOR=$forced)" } else { "" }))
