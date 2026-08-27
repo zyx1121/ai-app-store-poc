@@ -52,6 +52,7 @@ reason string. An `incompatible` item cannot be launched.
 | Keepalive | WSL stops a distro seconds after its last client exits; the app holds `wsl -d ai-app-store -- sleep infinity` while it runs |
 | Spaces | `docker pull registry.hf.space/<owner>-<name>:latest`, `docker run -p <free port>:<app_port> --gpus all`, poll the port until it answers; labels `aias.*` let a restarted app re-adopt containers |
 | Models | `ollama pull hf.co/<repo>:<quant>`, warm load through `/api/generate`, served on `localhost:11434/v1`; the Chat screen streams from it directly |
+| GPU memory | `gpu.rs` lists what is resident (Ollama `/api/ps`, GPU-backed services, GPU Space containers) against the accelerator's budget; before a launch the UI asks `gpu_plan`, shows what would be unloaded (largest heavy resident first until it fits), and `gpu_release` unloads it (`keep_alive: 0`, ComfyUI `/free`, container stop). One model family at a time on a 10 GB card; light services (speech, detection) stay |
 | Contract | every command and event is typed once in `src/lib/api.ts`; the Rust side mirrors it with serde |
 
 ## Hardware vendors

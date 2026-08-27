@@ -50,6 +50,12 @@ reliable (ollama/ollama#7969), which is why the zip is used.
    dev box takes 11 s for 2 steps; the GPU build should be well under that).
    ComfyUI's ROCm build refuses to start on a machine without a supported
    Radeon (RDNA 3 or newer); that is the expected failure on the wrong GPU.
+6b. GPU memory: with the chat model from step 4 still loaded, Canvas Start must
+   open a "GPU memory is in use" dialog listing the model when the two would
+   not fit (on a 10 GB card a 7B Q4 at 16k context does not fit next to
+   sd-turbo). "Unload and continue" frees it; the image then generates without
+   OOM. Running shows a GPU memory card with what is resident and per-item
+   Unload buttons.
 7. Vision: Start the CV server (OpenVINO Model Server on non-NVIDIA), download
    YOLOv10n, load an image, Detect. Expect boxes with scores in under a second.
 8. Browse, Apps tab: "Build locally" on a small gradio Space, for example

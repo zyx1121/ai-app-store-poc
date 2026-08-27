@@ -19,6 +19,7 @@ import {
 } from "@/components/ui/card";
 import { StatusBadge } from "@/components/StatusBadge";
 import { LogTail } from "@/components/LogTail";
+import { GpuMemoryCard } from "@/components/GpuMemoryCard";
 
 function upsert(list: Instance[], next: Instance): Instance[] {
   const idx = list.findIndex((i) => i.id === next.id);
@@ -62,7 +63,8 @@ export function Running({ onOpenChat }: { onOpenChat: (instanceId: string) => vo
 
   if (instances.length === 0) {
     return (
-      <div className="p-6">
+      <div className="flex flex-col gap-3 p-6">
+        <GpuMemoryCard />
         <p className="text-sm text-muted-foreground">
           No instances yet. Launch an app or model from Browse.
         </p>
@@ -72,6 +74,7 @@ export function Running({ onOpenChat }: { onOpenChat: (instanceId: string) => vo
 
   return (
     <div className="flex flex-col gap-3 p-6">
+      <GpuMemoryCard />
       {instances.map((instance) => {
         const canOpen = instance.kind === "space" && instance.status === "running" && instance.url;
         const canChat = instance.kind === "model" && instance.status === "running";

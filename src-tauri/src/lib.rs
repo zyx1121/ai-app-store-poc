@@ -2,6 +2,7 @@ mod build;
 mod cv;
 mod error;
 mod fetch;
+mod gpu;
 mod hardware;
 mod hf;
 mod instances;
@@ -126,6 +127,24 @@ async fn stop_service(app: AppHandle, id: services::ServiceId) -> CmdResult<()> 
     cmd(services::stop(app, id).await)
 }
 
+/// Everything holding GPU memory now and the budget it is measured against.
+#[tauri::command]
+async fn gpu_memory(app: AppHandle) -> CmdResult<gpu::GpuMemory> {
+    Ok(gpu::memory(&app).await)
+}
+
+/// What must be unloaded before a launch fits. The UI shows the list and asks.
+#[tauri::command]
+async fn gpu_plan(app: AppHandle, request: gpu::Request) -> CmdResult<gpu::Plan> {
+    Ok(gpu::plan(&app, request).await)
+}
+
+/// Unload one resident (a model, a service's weights, a Space container).
+#[tauri::command]
+async fn gpu_release(app: AppHandle, resident: gpu::Resident) -> CmdResult<()> {
+    cmd(gpu::release(&app, resident).await)
+}
+
 /// Run a detector on an image through the CV service. The image travels as the raw
 /// request body (no JSON encoding of bytes); options come as headers.
 #[tauri::command]
@@ -212,6 +231,9 @@ pub fn run() {
             service_models,
             install_service_model,
             cv_detect,
+            gpu_memory,
+            gpu_plan,
+            gpu_release,
             open_url,
         ])
         .run(tauri::generate_context!())

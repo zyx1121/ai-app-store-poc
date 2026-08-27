@@ -24,6 +24,7 @@ import {
   type ServiceStatus,
 } from "@/lib/api";
 import { Button } from "@/components/ui/button";
+import { useGpuGate } from "@/components/GpuGate";
 import { Badge } from "@/components/ui/badge";
 import {
   Card,
@@ -109,6 +110,7 @@ function nodeErrorSummary(errors: Record<string, unknown>): string {
 export function Canvas() {
   const [status, setStatus] = useState<ServiceStatus | null>(null);
   const [serviceBusy, setServiceBusy] = useState(false);
+  const { gate, dialog: gpuDialog } = useGpuGate();
   const [serviceError, setServiceError] = useState<string | null>(null);
 
   const [models, setModels] = useState<ServiceModel[]>([]);
@@ -212,6 +214,9 @@ export function Canvas() {
     setServiceBusy(true);
     setServiceError(null);
     try {
+      // Image generation needs the card to itself next to a chat LLM on 10 GB;
+      // ask what must be unloaded first (issue #10).
+      if (!(await gate({ kind: "service", id: SERVICE_ID }))) return;
       const s = await startService(SERVICE_ID);
       setStatus(s);
     } catch (err) {
@@ -504,6 +509,7 @@ export function Canvas() {
 
   return (
     <div className="flex h-full flex-col gap-3 overflow-y-auto p-6">
+      {gpuDialog}
       <Card className="shrink-0">
         <CardHeader>
           <CardTitle className="flex items-center gap-2">

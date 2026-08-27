@@ -494,6 +494,34 @@ pub async fn stop(app: AppHandle, id: String) -> Result<()> {
     Ok(())
 }
 
+/// A model was unloaded from Ollama behind the instance's back (GPU memory
+/// scheduling); reflect that on every instance that served the tag.
+pub fn mark_model_unloaded(app: &AppHandle, tag: &str) {
+    let state = app.state::<AppState>();
+    let ids: Vec<String> = state
+        .instances
+        .lock()
+        .map(|m| {
+            m.values()
+                .filter(|i| i.kind == Kind::Model && i.model_tag.as_deref() == Some(tag))
+                .filter(|i| i.status == Status::Running)
+                .map(|i| i.id.clone())
+                .collect()
+        })
+        .unwrap_or_default();
+    for id in ids {
+        push_log(
+            app,
+            &id,
+            "unloaded to free GPU memory for another launch".into(),
+        );
+        update(app, &id, |i| {
+            i.status = Status::Stopped;
+            i.url = None;
+        });
+    }
+}
+
 pub async fn remove(app: AppHandle, id: String) -> Result<()> {
     let state = app.state::<AppState>();
     if let Some(inst) = get(&state, &id) {
