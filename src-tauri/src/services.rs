@@ -291,13 +291,34 @@ const CV_OVMS: ServiceSpec = ServiceSpec {
     ..CV_TRITON
 };
 
-/// Intel machines with an NPU: OpenVINO Model Server targeting the NPU device.
-/// Same image, container, KServe v2 API and ONNX files as the CPU build; only the
-/// per-model `target_device` in `ovms.json` differs (written by the store). Sits
-/// above the CPU rung so an Intel NPU is used when present, and still falls back
-/// to it if the NPU cannot compile a given detector.
+/// Intel machines with an NPU: OpenVINO Model Server as a native Windows process.
+/// WSL2 exposes no NPU device (`/dev/dxg` only, no `/dev/accel`), so the container
+/// build cannot reach it; OVMS runs natively where the NPU driver lives. Same
+/// KServe v2 API and ONNX detectors as the CPU build, but the model repo and
+/// `ovms.json` (with `target_device: NPU`) live on the Windows side, written by
+/// the store. Sits above the CPU rung; a machine with no NPU falls through to it.
 const CV_OVMS_NPU: ServiceSpec = ServiceSpec {
     backend: "openvino-npu",
+    runtime: Runtime::Native {
+        downloads: &[(
+            "https://github.com/openvinotoolkit/model_server/releases/download/v2026.3/ovms_windows_2026.3.0_python_off.zip",
+            "ovms.zip",
+        )],
+        exe: "ovms\\ovms.exe",
+        args: &[
+            "--config_path",
+            "ovms.json",
+            "--rest_port",
+            "8900",
+            "--port",
+            "9000",
+            "--file_system_poll_wait_seconds",
+            "2",
+        ],
+        env: &[],
+        cwd: "",
+        models_required: false,
+    },
     ..CV_OVMS
 };
 
@@ -513,16 +534,60 @@ fn model_files(s: &ServiceSpec) -> Vec<(String, String, String)> {
         .map(|(n, u, p)| (n.to_string(), u.to_string(), p.to_string()))
         .collect();
     if s.id == ServiceId::Cv {
-        let (_, mount) = CV_STORE;
-        out.extend(cv::DETECTORS.iter().map(|d| {
-            (
-                d.name.to_string(),
-                d.url.to_string(),
-                format!("{mount}/repo/{}/1/model.onnx", d.name),
-            )
-        }));
+        match s.runtime {
+            // Native OVMS keeps its model repo on the Windows side, relative to the
+            // install dir; the container build keeps it in the shared distro volume.
+            Runtime::Native { .. } => out.extend(cv::DETECTORS.iter().map(|d| {
+                (
+                    d.name.to_string(),
+                    d.url.to_string(),
+                    format!("models\\repo\\{}\\1\\model.onnx", d.name),
+                )
+            })),
+            Runtime::Container { .. } => {
+                let (_, mount) = CV_STORE;
+                out.extend(cv::DETECTORS.iter().map(|d| {
+                    (
+                        d.name.to_string(),
+                        d.url.to_string(),
+                        format!("{mount}/repo/{}/1/model.onnx", d.name),
+                    )
+                }));
+            }
+        }
     }
     out
+}
+
+/// Write `ovms.json` for a native OVMS install: every detector whose ONNX is
+/// present, with an absolute forward-slash base_path and this spec's target
+/// device. OVMS re-reads it on its file poll, so it works before or during a run.
+async fn write_native_cv_config(id: ServiceId, s: &ServiceSpec) -> Result<()> {
+    let dir = native_dir(id)?;
+    let target = ov_target_device(s);
+    let mut items: Vec<String> = Vec::new();
+    for d in cv::DETECTORS {
+        let onnx = dir.join(format!("models\\repo\\{}\\1\\model.onnx", d.name));
+        let present = tokio::fs::metadata(&onnx)
+            .await
+            .map(|m| m.len() > 0)
+            .unwrap_or(false);
+        if !present {
+            continue;
+        }
+        let base = dir
+            .join(format!("models\\repo\\{}", d.name))
+            .to_string_lossy()
+            .replace('\\', "/");
+        items.push(format!(
+            r#"{{"config":{{"name":"{}","base_path":"{}","target_device":"{}"}}}}"#,
+            d.name, base, target
+        ));
+    }
+    let json = format!(r#"{{"model_config_list":[{}]}}"#, items.join(","));
+    tokio::fs::create_dir_all(&dir).await?;
+    tokio::fs::write(dir.join("ovms.json"), json).await?;
+    Ok(())
 }
 
 fn display_name(id: ServiceId, name: &str) -> String {
@@ -659,6 +724,11 @@ pub async fn install_model(app: AppHandle, id: ServiceId, name: String) -> Resul
             let http = state.http.clone();
             let app2 = app.clone();
             fetch::download(&http, &url, &dest, &mut |l| push_log(&app2, id, l)).await?;
+            // A native CV server (OVMS) reads its model list from ovms.json; refresh it
+            // so a running server picks the new detector up on its file poll.
+            if id == ServiceId::Cv {
+                write_native_cv_config(id, s).await?;
+            }
         }
         Runtime::Container {
             model_store,
@@ -1051,6 +1121,12 @@ async fn run_native(app: &AppHandle, s: &ServiceSpec) -> Result<()> {
             st.image_present = true;
             st.state = ServiceState::Starting;
         });
+    }
+
+    // A native OVMS server needs a valid ovms.json before it starts; write it from
+    // whatever detectors are installed (an empty list is valid and hot-fills later).
+    if id == ServiceId::Cv {
+        write_native_cv_config(id, s).await?;
     }
 
     // Anything already listening on our port (a server left over from an earlier
