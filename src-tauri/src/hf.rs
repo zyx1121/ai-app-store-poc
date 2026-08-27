@@ -370,6 +370,12 @@ pub async fn model_files(
     Ok(files)
 }
 
+/// Bytes a GGUF of `size` occupies once loaded: the weights, an eighth for
+/// compute buffers, and about 1.5 GB of KV cache at the default context.
+pub fn model_need_bytes(size: u64) -> u64 {
+    size + size / 8 + 1_500_000_000
+}
+
 /// Weights plus ~1.5 GB of KV cache must fit the accelerator's budget to be
 /// "gpu"; up to 16 GB of spill is "partial" (CPU offload); beyond that "no".
 /// The budget is dedicated VRAM on a discrete card and half of system RAM on a
@@ -379,7 +385,7 @@ fn fit(size: u64, budget_mb: Option<u64>) -> &'static str {
         return "partial";
     };
     let vram = vram * 1024 * 1024;
-    let need = size + size / 8 + 1_500_000_000;
+    let need = model_need_bytes(size);
     if need <= vram {
         "gpu"
     } else if need <= vram + 16_000_000_000 {

@@ -303,6 +303,55 @@ export const cvDetect = (image: Uint8Array, model: string, minScore = 0.25) =>
     headers: { "x-model": model, "x-min-score": String(minScore) },
   });
 
+// ---------------------------------------------------------------------------
+// GPU memory scheduling. One card holds one modality's model family at a time;
+// before a launch the UI asks what must be unloaded, shows it, and releases it.
+// ---------------------------------------------------------------------------
+
+export type ResidentKind = "model" | "service" | "space";
+
+export type Resident = {
+  kind: ResidentKind;
+  /** model tag, ServiceId, or instance id */
+  id: string;
+  name: string;
+  /** memory held now; null when the runtime cannot report it (Space containers) */
+  vram_mb: number | null;
+  /** holds a whole model family; only heavy residents are ever evicted */
+  heavy: boolean;
+};
+
+export type GpuMemory = {
+  /** the accelerator's budget (dedicated VRAM or the unified share); null on CPU machines */
+  budget_mb: number | null;
+  /** device-wide memory in use when a runtime reports it */
+  used_mb: number | null;
+  residents: Resident[];
+};
+
+export type GpuRequest =
+  | { kind: "model"; tag: string; size_bytes: number | null }
+  | { kind: "service"; id: ServiceId }
+  /** `id` is the Space's `owner/name` */
+  | { kind: "space"; id: string };
+
+export type GpuPlan = {
+  need_mb: number | null;
+  budget_mb: number | null;
+  /** memory held by what stays */
+  resident_mb: number;
+  /** unload these, in order, before the launch */
+  evict: Resident[];
+  fits_without_eviction: boolean;
+};
+
+export const gpuMemory = () => invoke<GpuMemory>("gpu_memory");
+
+export const gpuPlan = (request: GpuRequest) => invoke<GpuPlan>("gpu_plan", { request });
+
+/** Unload one resident: `keep_alive: 0` for models, `/free` for ComfyUI, stop for the rest. */
+export const gpuRelease = (resident: Resident) => invoke<void>("gpu_release", { resident });
+
 /** ComfyUI HTTP API (`/prompt`, `/history/{id}`, `/view`, `/upload/image`). */
 export const COMFYUI_PORT = 8188;
 export const COMFYUI_BASE_URL = `http://localhost:${COMFYUI_PORT}`;

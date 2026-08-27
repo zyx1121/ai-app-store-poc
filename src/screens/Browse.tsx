@@ -35,6 +35,7 @@ import {
 } from "@/components/ui/dialog";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { CompatBadge } from "@/components/CompatBadge";
+import { useGpuGate } from "@/components/GpuGate";
 import { formatBytes, formatCount } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
@@ -88,6 +89,7 @@ export function Browse({ onLaunched }: { onLaunched: () => void }) {
   const [filesState, setFilesState] = useState<LoadState>("loading");
   const [selectedFile, setSelectedFile] = useState<GgufFile | null>(null);
   const [launching, setLaunching] = useState(false);
+  const { gate, dialog: gpuDialog } = useGpuGate();
 
   useEffect(() => {
     const t = setTimeout(() => setDebouncedQuery(query), 400);
@@ -156,10 +158,16 @@ export function Browse({ onLaunched }: { onLaunched: () => void }) {
     if (e.key === "Enter") setDebouncedQuery(query);
   }
 
+  /** Spaces on a GPU tier hold VRAM of their own; CPU tiers launch without asking. */
+  function spaceWantsGpu(space: SpaceSummary): boolean {
+    return !!space.hardware && !space.hardware.startsWith("cpu");
+  }
+
   async function runSpace(space: SpaceSummary) {
     setLaunchError(null);
     setLaunchingId(space.id);
     try {
+      if (spaceWantsGpu(space) && !(await gate({ kind: "space", id: space.id }))) return;
       await launchSpace(space.id);
       onLaunched();
     } catch (e) {
@@ -173,6 +181,7 @@ export function Browse({ onLaunched }: { onLaunched: () => void }) {
     setLaunchError(null);
     setBuildingId(space.id);
     try {
+      if (spaceWantsGpu(space) && !(await gate({ kind: "space", id: space.id }))) return;
       await buildSpace(space.id);
       onLaunched();
     } catch (e) {
@@ -187,6 +196,8 @@ export function Browse({ onLaunched }: { onLaunched: () => void }) {
     setLaunching(true);
     setLaunchError(null);
     try {
+      const tag = `hf.co/${dialogModel.id}:${selectedFile.quant}`;
+      if (!(await gate({ kind: "model", tag, size_bytes: selectedFile.size_bytes }))) return;
       await launchModel(dialogModel.id, selectedFile.quant);
       setDialogModel(null);
       onLaunched();
@@ -199,6 +210,7 @@ export function Browse({ onLaunched }: { onLaunched: () => void }) {
 
   return (
     <div className="flex flex-col gap-4 p-6">
+      {gpuDialog}
       <Input
         value={query}
         onChange={(e) => setQuery(e.target.value)}
