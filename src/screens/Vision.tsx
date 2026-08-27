@@ -28,6 +28,7 @@ import {
 } from "@/lib/api";
 import { ollama } from "@/lib/chat";
 import { Button } from "@/components/ui/button";
+import { useGpuGate } from "@/components/GpuGate";
 import { Badge } from "@/components/ui/badge";
 import {
   Select,
@@ -138,6 +139,7 @@ export function Vision() {
   const [instances, setInstances] = useState<Instance[]>([]);
   const [launching, setLaunching] = useState(false);
   const [launchError, setLaunchError] = useState<string | null>(null);
+  const { gate, dialog: gpuDialog } = useGpuGate();
 
   const [sourceTab, setSourceTab] = useState<"camera" | "image">("camera");
   const [modeTab, setModeTab] = useState<"ask" | "detect">("ask");
@@ -290,6 +292,8 @@ export function Vision() {
     setLaunching(true);
     setLaunchError(null);
     try {
+      // qwen2.5vl:7b is a 6 GB pull; next to a chat LLM it overflows a 10 GB card.
+      if (!(await gate({ kind: "model", tag: "qwen2.5vl:7b", size_bytes: 6_000_000_000 }))) return;
       const instance = await launchModel("qwen2.5vl", "7b");
       setInstances((prev) => upsert(prev, instance));
     } catch (err) {
@@ -550,6 +554,7 @@ export function Vision() {
 
   return (
     <div className="flex h-full flex-col gap-3 overflow-y-auto p-6">
+      {gpuDialog}
       {!visionInstance ? (
         <Card className="shrink-0">
           <CardHeader>

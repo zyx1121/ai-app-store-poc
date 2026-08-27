@@ -641,6 +641,52 @@ fn ov_target_device(spec: &ServiceSpec) -> &'static str {
     }
 }
 
+/// The serde name of a service id (`speaches`, `comfyui`, `cv`, `whisper`).
+pub fn id_str(id: ServiceId) -> &'static str {
+    match id {
+        ServiceId::Speaches => "speaches",
+        ServiceId::Comfyui => "comfyui",
+        ServiceId::Cv => "cv",
+        ServiceId::Whisper => "whisper",
+    }
+}
+
+pub fn parse_id(s: &str) -> Option<ServiceId> {
+    match s {
+        "speaches" => Some(ServiceId::Speaches),
+        "comfyui" => Some(ServiceId::Comfyui),
+        "cv" => Some(ServiceId::Cv),
+        "whisper" => Some(ServiceId::Whisper),
+        _ => None,
+    }
+}
+
+/// Windows-side port of a service (the same on every vendor).
+pub fn port(id: ServiceId) -> u16 {
+    match id {
+        ServiceId::Speaches => SPEACHES.host_port,
+        ServiceId::Comfyui => COMFYUI.host_port,
+        ServiceId::Cv => CV_TRITON.host_port,
+        ServiceId::Whisper => WHISPER_PORT,
+    }
+}
+
+/// Does this machine's implementation of the service hold GPU memory? A CUDA
+/// container only when the distro can see the GPU; native builds whenever their
+/// backend is a GPU one (Vulkan, ROCm, XPU, the NPU).
+pub fn uses_gpu(app: &AppHandle, id: ServiceId) -> bool {
+    let state = app.state::<AppState>();
+    let Some(s) = spec(id, selector(&state)) else {
+        return false;
+    };
+    match s.runtime {
+        Runtime::Container { gpu, .. } => gpu && state.has_gpu(),
+        Runtime::Native { .. } => {
+            matches!(s.backend, "vulkan" | "rocm" | "xpu" | "openvino-npu")
+        }
+    }
+}
+
 /// Name of the implementation this machine gets for a service, without probing it.
 pub fn backend_name(app: &AppHandle, id: ServiceId) -> String {
     spec(id, selector(&app.state::<AppState>()))
