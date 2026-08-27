@@ -94,6 +94,15 @@ re-enable it afterwards with `wsl -d ai-app-store -u root --exec systemctl enabl
   integrated GPUs; without both flags it runs on the CPU. Verified: on an Intel
   Core Ultra 5 225H the Arc 130T iGPU takes 100% of the inference through
   Vulkan (`ollama ps` shows `100% GPU`).
+- Every native Windows service (Ollama, whisper.cpp, portable ComfyUI, OVMS)
+  binds `127.0.0.1` only. Windows Defender Firewall only prompts for listeners
+  on a non-loopback interface, so starting them never raises the "allow this
+  app" dialog and no firewall rule is installed or left behind. Verified on the
+  dev box: OVMS with its default flags listens on `0.0.0.0:8900` and `:::9000`;
+  with `--rest_bind_address 127.0.0.1 --grpc_bind_address 127.0.0.1` both move
+  to `127.0.0.1`. If a future service must be reachable from another machine,
+  add a `New-NetFirewallRule -Program <exe>` step to the elevated provisioning
+  task and remove it on uninstall; do not make it the default.
 - On an Intel machine with an NPU, the CV server runs as a native Windows OVMS
   process targeting the NPU (`target_device: NPU`); the Vision card shows backend
   `openvino-npu`, runtime native. It is native because WSL2 exposes no NPU to
