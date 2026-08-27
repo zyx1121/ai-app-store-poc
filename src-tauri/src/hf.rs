@@ -334,11 +334,12 @@ fn summarize_model(m: RawModel) -> ModelSummary {
     }
 }
 
-/// GGUF files in a repo, smallest first, with a fit verdict against `vram_mb`.
+/// GGUF files in a repo, smallest first, with a fit verdict against `budget_mb`,
+/// the accelerator's effective memory (`RuntimeStatus::effective_memory_mb`).
 pub async fn model_files(
     http: &reqwest::Client,
     repo: &str,
-    vram_mb: Option<u64>,
+    budget_mb: Option<u64>,
 ) -> Result<Vec<GgufFile>> {
     validate_repo(repo)?;
     let m: RawModel = get(http, &format!("{HF}/models/{repo}?blobs=true")).await?;
@@ -358,7 +359,7 @@ pub async fn model_files(
                 .unwrap_or_else(|| "UNKNOWN".into());
             let size = s.size.unwrap_or(0);
             GgufFile {
-                fits: fit(size, vram_mb),
+                fits: fit(size, budget_mb),
                 filename: s.rfilename,
                 quant,
                 size_bytes: size,
@@ -369,10 +370,12 @@ pub async fn model_files(
     Ok(files)
 }
 
-/// Weights plus ~1.5 GB of KV cache must fit in VRAM to be "gpu"; up to 16 GB
-/// of spill is "partial" (CPU offload); beyond that we call it "no".
-fn fit(size: u64, vram_mb: Option<u64>) -> &'static str {
-    let Some(vram) = vram_mb else {
+/// Weights plus ~1.5 GB of KV cache must fit the accelerator's budget to be
+/// "gpu"; up to 16 GB of spill is "partial" (CPU offload); beyond that "no".
+/// The budget is dedicated VRAM on a discrete card and half of system RAM on a
+/// unified part (`hardware::unified_budget_mb`), never the iGPU's carve-out.
+fn fit(size: u64, budget_mb: Option<u64>) -> &'static str {
+    let Some(vram) = budget_mb else {
         return "partial";
     };
     let vram = vram * 1024 * 1024;

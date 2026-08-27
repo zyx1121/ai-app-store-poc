@@ -57,8 +57,16 @@ reason string. An `incompatible` item cannot be launched.
 ## Hardware vendors
 
 The store probes the host (PowerShell: video controllers with VRAM from the
-driver registry key, NPU devices) and picks a primary vendor. Everything below
-the UI keys off it; the four base UIs only ever talk to `localhost` APIs.
+driver registry key, NPU devices, physical RAM) and picks a primary vendor.
+Everything below the UI keys off it; the four base UIs only ever talk to
+`localhost` APIs.
+
+Each accelerator carries a memory model. A discrete card is `dedicated` and its
+VRAM is the budget. An integrated GPU or an NPU is `unified`: the registry only
+reports the driver's carve-out (2 GB on a Core Ultra laptop) while the device
+addresses system RAM through WDDM shared GPU memory, so the budget is half of
+physical RAM (`effective_memory_mb`). Compatibility verdicts (GGUF fit, model
+selector) read the budget, never the raw figure; Setup shows both.
 
 | | NVIDIA | AMD / Intel / CPU |
 |---|---|---|

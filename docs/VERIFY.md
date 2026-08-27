@@ -26,8 +26,11 @@ reliable (ollama/ollama#7969), which is why the zip is used.
 ## Steps on the target machine
 
 1. Install the MSI from the latest CI run or release and open the store.
-2. Setup: the Hardware card must show the right vendor, every GPU with VRAM,
-   any NPU, and the runtime plan for that vendor. The status list has a
+2. Setup: the Hardware card must show the right vendor, every GPU with its
+   memory, any NPU, and the runtime plan for that vendor. On an integrated GPU
+   the Memory column reads `<budget> shared (<carve-out> reserved)` and a
+   "Model budget" line gives half of RAM; a 7B Q4 GGUF must show as fitting
+   the GPU in Browse. A discrete card shows its VRAM only. The status list has a
    "Virtualization (UEFI)" row: it must be green (hypervisor running, or VT
    enabled in firmware) before provisioning can install WSL2. If it is red,
    the card explains the UEFI toggle; that step is the one thing the store

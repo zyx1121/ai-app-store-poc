@@ -27,7 +27,11 @@ pub struct RuntimeStatus {
     pub gpu_ok: bool,
     pub ollama_ok: bool,
     pub gpu_name: Option<String>,
+    /// Dedicated memory of the primary GPU as the driver reports it (display).
     pub vram_mb: Option<u64>,
+    /// What a model may occupy on the primary accelerator: `vram_mb` on a
+    /// discrete card, half of system RAM on a unified part. Verdicts read this.
+    pub effective_memory_mb: Option<u64>,
     pub ready: bool,
     pub reboot_required: bool,
     /// virtualization must be enabled in UEFI firmware before WSL2 can run
@@ -91,6 +95,7 @@ pub async fn status() -> RuntimeStatus {
     if let Some(g) = &s.hardware.primary_gpu {
         s.gpu_name = Some(g.name.clone());
         s.vram_mb = g.vram_mb;
+        s.effective_memory_mb = g.effective_memory_mb;
     }
 
     match wsl::wsl(&["--status"]).await {
@@ -140,8 +145,10 @@ pub async fn status() -> RuntimeStatus {
                         .and_then(|m| m.parse::<u64>().ok());
                     let name = parts.next().map(|n| n.trim().to_string());
                     if let (Some(name), Some(mem)) = (name, mem) {
+                        // nvidia-smi is authoritative for a CUDA card: dedicated memory.
                         s.gpu_name = Some(name);
                         s.vram_mb = Some(mem);
+                        s.effective_memory_mb = Some(mem);
                     }
                 }
                 _ => {}

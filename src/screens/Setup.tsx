@@ -67,8 +67,15 @@ function runtimePlan(vendor: Vendor): string[] {
   }
 }
 
-function gpuVram(gpu: Gpu): string {
-  return gpu.vram_mb ? `${(gpu.vram_mb / 1024).toFixed(1)} GB` : "-";
+const gb = (mb: number) => `${(mb / 1024).toFixed(1)} GB`;
+
+/** Discrete: the VRAM. Unified: the shared budget verdicts use, with the carve-out the driver reports. */
+function gpuMemory(gpu: Gpu): string {
+  if (gpu.memory_model === "unified") {
+    const budget = gpu.effective_memory_mb ? `${gb(gpu.effective_memory_mb)} shared` : "shared";
+    return gpu.vram_mb ? `${budget} (${gb(gpu.vram_mb)} reserved)` : budget;
+  }
+  return gpu.vram_mb ? gb(gpu.vram_mb) : "-";
 }
 
 function HardwareCard({
@@ -93,13 +100,13 @@ function HardwareCard({
         <div className="flex flex-col gap-1">
           <div className="grid grid-cols-[minmax(0,1fr)_auto_auto_auto] gap-x-3 gap-y-1 text-xs">
             <span className="text-muted-foreground">Name</span>
-            <span className="text-muted-foreground">VRAM</span>
+            <span className="text-muted-foreground">Memory</span>
             <span className="text-muted-foreground"></span>
             <span className="text-muted-foreground">Driver</span>
             {hardware.gpus.map((gpu) => (
               <Fragment key={gpu.name}>
                 <span className="truncate">{gpu.name}</span>
-                <span>{gpuVram(gpu)}</span>
+                <span>{gpuMemory(gpu)}</span>
                 <span>{gpu.integrated && <Badge variant="outline">integrated</Badge>}</span>
                 <span className="text-muted-foreground">{gpu.driver ?? "-"}</span>
               </Fragment>
@@ -114,11 +121,14 @@ function HardwareCard({
             <div key={npu.name} className="flex items-center gap-2 text-sm">
               <Microchip className="size-4 shrink-0 text-muted-foreground" />
               <span>{npu.name}</span>
-              <span className="text-xs text-muted-foreground">({npu.vendor})</span>
+              <span className="text-xs text-muted-foreground">
+                ({npu.vendor}
+                {npu.effective_memory_mb ? `, ${gb(npu.effective_memory_mb)} shared` : ""})
+              </span>
             </div>
           ))}
           <p className="text-xs text-muted-foreground">
-            NPU detected; acceleration not used yet
+            NPU detected; used for detection on Intel, other modalities not yet
           </p>
         </div>
       )}
@@ -135,6 +145,13 @@ function HardwareCard({
       <p className="text-xs text-muted-foreground">
         GPU visible to WSL2: {hardware.wsl_gpu ? "yes" : "no"}
       </p>
+      {hardware.primary_gpu?.memory_model === "unified" && hardware.primary_gpu.effective_memory_mb && (
+        <p className="text-xs text-muted-foreground">
+          Model budget: {gb(hardware.primary_gpu.effective_memory_mb)}
+          {hardware.total_ram_mb ? ` (unified memory, half of ${gb(hardware.total_ram_mb)} RAM)` : ""}
+          ; the reserved figure is the driver carve-out, not the ceiling
+        </p>
+      )}
 
       {(() => {
         const v = hardware.virtualization;

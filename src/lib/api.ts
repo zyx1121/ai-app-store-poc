@@ -13,16 +13,28 @@ import { relaunch as relaunchApp } from "@tauri-apps/plugin-process";
 
 export type Vendor = "nvidia" | "amd" | "intel" | "cpu";
 
+/** `dedicated`: a discrete card, `vram_mb` is the budget. `unified`: shares system RAM. */
+export type MemoryModel = "dedicated" | "unified";
+
 export type Gpu = {
   name: string;
   vendor: Vendor;
+  /** dedicated memory as the driver reports it; on a unified part only the small carve-out */
   vram_mb: number | null;
   /** integrated graphics (shares system RAM); a discrete card is preferred */
   integrated: boolean;
   driver: string | null;
+  memory_model: MemoryModel;
+  /** what a model may occupy here: `vram_mb` on a discrete card, half of system RAM on a unified part */
+  effective_memory_mb: number | null;
 };
 
-export type Npu = { name: string; vendor: "intel" | "amd" | "qualcomm" | "unknown" };
+export type Npu = {
+  name: string;
+  vendor: "intel" | "amd" | "qualcomm" | "unknown";
+  /** NPUs share system RAM: same budget as a unified GPU */
+  effective_memory_mb: number | null;
+};
 
 export type Virtualization = {
   /** the CPU has VT-x / AMD-V */
@@ -42,6 +54,8 @@ export type HardwareProfile = {
   /** only NVIDIA can be handed to WSL2 containers; other vendors run natively on Windows */
   wsl_gpu: boolean;
   virtualization: Virtualization;
+  /** physical RAM; sizes the budget of unified-memory accelerators */
+  total_ram_mb: number | null;
 };
 
 export type RuntimeStatus = {
@@ -56,7 +70,10 @@ export type RuntimeStatus = {
   gpu_ok: boolean;
   ollama_ok: boolean;
   gpu_name: string | null;
+  /** dedicated memory of the primary GPU (display) */
   vram_mb: number | null;
+  /** budget compatibility verdicts use: `vram_mb` on a discrete card, half of RAM on a unified part */
+  effective_memory_mb: number | null;
   /** everything above that is required is true */
   ready: boolean;
   /** a Windows reboot is required before continuing (WSL feature just enabled) */

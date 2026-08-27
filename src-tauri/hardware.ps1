@@ -25,4 +25,8 @@ $virt = [pscustomobject]@{
   vt_firmware_enabled = [bool]$cpu.VirtualizationFirmwareEnabled
   hypervisor_present  = [bool]$cs.HypervisorPresent
 }
-[pscustomobject]@{ gpus = @($gpus); npus = @($npus); virtualization = $virt } | ConvertTo-Json -Depth 4 -Compress
+# Integrated GPUs and NPUs address system RAM (WDDM shared GPU memory), so the
+# Rust side needs the physical total to size their budget; the registry only
+# reports the small dedicated carve-out for them.
+$totalRam = if ($cs.TotalPhysicalMemory) { [math]::Round($cs.TotalPhysicalMemory / 1MB) } else { $null }
+[pscustomobject]@{ gpus = @($gpus); npus = @($npus); virtualization = $virt; total_ram_mb = $totalRam } | ConvertTo-Json -Depth 4 -Compress
