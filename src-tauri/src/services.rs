@@ -334,21 +334,94 @@ const WHISPER_VULKAN: ServiceSpec = ServiceSpec {
     },
 };
 
-/// The implementation of a service for this machine's GPU vendor, if it has one.
+/// One rung of a modality's runtime resolution chain: the first rung whose
+/// `applies` matches this machine wins. Specialised rungs come first, the generic
+/// fallback last, so a machine with no special stack still resolves to something
+/// that runs (or to nothing, where a modality has no generic fallback).
+///
+/// `applies` keys off `Vendor` for now. When capability adapters land (NPU,
+/// aiDAPTIV) it widens to the full `HardwareProfile`, and a device-profile rung
+/// for shipped SKUs is prepended; the ordered-chain shape here is that model.
+/// See docs/adr/0001-accelerator-adapters.md.
+struct Rung {
+    applies: fn(Vendor) -> bool,
+    spec: &'static ServiceSpec,
+}
+
+const fn any(_: Vendor) -> bool {
+    true
+}
+const fn is_nvidia(v: Vendor) -> bool {
+    matches!(v, Vendor::Nvidia)
+}
+const fn is_amd(v: Vendor) -> bool {
+    matches!(v, Vendor::Amd)
+}
+const fn is_intel(v: Vendor) -> bool {
+    matches!(v, Vendor::Intel)
+}
+const fn amd_or_intel(v: Vendor) -> bool {
+    matches!(v, Vendor::Amd | Vendor::Intel)
+}
+
+/// The resolution chain for a modality, specialised rungs first, generic last.
+fn chain(id: ServiceId) -> &'static [Rung] {
+    match id {
+        ServiceId::Speaches => &[
+            Rung {
+                applies: is_nvidia,
+                spec: &SPEACHES,
+            },
+            Rung {
+                applies: any,
+                spec: &SPEACHES_CPU,
+            },
+        ],
+        ServiceId::Comfyui => &[
+            Rung {
+                applies: is_nvidia,
+                spec: &COMFYUI,
+            },
+            Rung {
+                applies: is_amd,
+                spec: &COMFYUI_ROCM,
+            },
+            Rung {
+                applies: is_intel,
+                spec: &COMFYUI_XPU,
+            },
+            Rung {
+                applies: any,
+                spec: &COMFYUI_CPU,
+            },
+        ],
+        ServiceId::Cv => &[
+            Rung {
+                applies: is_nvidia,
+                spec: &CV_TRITON,
+            },
+            Rung {
+                applies: any,
+                spec: &CV_OVMS,
+            },
+        ],
+        // Speaches already serves STT on CUDA and CPU; whisper.cpp only earns its
+        // place where the GPU is reachable only through Vulkan. No generic rung:
+        // NVIDIA and CPU resolve to nothing and keep using Speaches for STT.
+        ServiceId::Whisper => &[Rung {
+            applies: amd_or_intel,
+            spec: &WHISPER_VULKAN,
+        }],
+    }
+}
+
+/// The implementation of a service for this machine, the first rung of the
+/// modality's chain that applies, or `None` when the chain has no fallback here.
 fn spec(id: ServiceId, vendor: Vendor) -> Option<&'static ServiceSpec> {
-    Some(match (id, vendor) {
-        (ServiceId::Speaches, Vendor::Nvidia) => &SPEACHES,
-        (ServiceId::Speaches, _) => &SPEACHES_CPU,
-        (ServiceId::Comfyui, Vendor::Nvidia) => &COMFYUI,
-        (ServiceId::Comfyui, Vendor::Amd) => &COMFYUI_ROCM,
-        (ServiceId::Comfyui, Vendor::Intel) => &COMFYUI_XPU,
-        (ServiceId::Comfyui, Vendor::Cpu) => &COMFYUI_CPU,
-        (ServiceId::Cv, Vendor::Nvidia) => &CV_TRITON,
-        (ServiceId::Cv, _) => &CV_OVMS,
-        // Speaches already runs speech on CUDA; on a CPU-only box Vulkan has nothing to drive.
-        (ServiceId::Whisper, Vendor::Amd | Vendor::Intel) => &WHISPER_VULKAN,
-        (ServiceId::Whisper, Vendor::Nvidia | Vendor::Cpu) => return None,
-    })
+    chain(id)
+        .iter()
+        .find(|rung| (rung.applies)(vendor))
+        .map(|rung| rung.spec)
 }
 
 fn require_spec(id: ServiceId, vendor: Vendor) -> Result<&'static ServiceSpec> {
@@ -1073,6 +1146,42 @@ mod tests {
             spec(ServiceId::Whisper, Vendor::Intel).unwrap().backend,
             "vulkan"
         );
+    }
+
+    #[test]
+    fn chain_has_a_generic_fallback_except_whisper() {
+        // Every vendor resolves for the always-on modalities; the last rung is the
+        // generic one (SPEACHES_CPU / COMFYUI_CPU / CV_OVMS), reached by cpu.
+        for id in [ServiceId::Speaches, ServiceId::Comfyui, ServiceId::Cv] {
+            for v in [Vendor::Nvidia, Vendor::Amd, Vendor::Intel, Vendor::Cpu] {
+                assert!(spec(id, v).is_some(), "{id:?} has no rung for {v:?}");
+            }
+        }
+        // Whisper is specialised-only: it resolves on AMD/Intel and nowhere else.
+        assert!(spec(ServiceId::Whisper, Vendor::Amd).is_some());
+        assert!(spec(ServiceId::Whisper, Vendor::Intel).is_some());
+        assert!(spec(ServiceId::Whisper, Vendor::Nvidia).is_none());
+        assert!(spec(ServiceId::Whisper, Vendor::Cpu).is_none());
+    }
+
+    #[test]
+    fn chain_is_specialised_before_generic() {
+        // The generic rung matches any vendor, so it must be last or it would
+        // shadow the specialised rungs above it.
+        for id in [ServiceId::Speaches, ServiceId::Comfyui, ServiceId::Cv] {
+            let rungs = chain(id);
+            let generic = rungs.iter().position(|r| {
+                (r.applies)(Vendor::Nvidia)
+                    && (r.applies)(Vendor::Amd)
+                    && (r.applies)(Vendor::Intel)
+                    && (r.applies)(Vendor::Cpu)
+            });
+            assert_eq!(
+                generic,
+                Some(rungs.len() - 1),
+                "{id:?} generic rung not last"
+            );
+        }
     }
 
     #[test]

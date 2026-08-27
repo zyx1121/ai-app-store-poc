@@ -74,6 +74,50 @@ adapter (nvidia / amd / intel / cpu) plus optional capability adapters (an NPU
 adapter, an aiDAPTIV adapter). Adapters compose; the LLM adapter for a machine
 with aiDAPTIV is the aiDAPTIV one instead of plain Ollama, chosen by priority.
 
+### Resolution is a fallback chain, not four buckets
+
+Do not think of this as picking one of nvidia / amd / intel / cpu. For each
+(modality, device) the store walks an ordered chain and takes the highest rung
+whose `detect()` passes, falling through to a generic runtime when nothing
+special applies. For an LLM:
+
+```text
+device profile (a shipped SKU we pinned and pre-verified)
+  -> capability runtime (NPU, or aiDAPTIV for models past memory)
+    -> vendor GPU runtime (Ollama ROCm / XPU / CUDA)
+      -> generic Ollama Vulkan (any iGPU)
+        -> CPU
+```
+
+This gives three properties at once:
+
+- **Specialisation** where a stack clearly wins (NPU, aiDAPTIV big models, NVIDIA
+  throughput).
+- **A generic safety net**: a self-built or unseen PC falls through to Ollama
+  Vulkan or CPU and still works.
+- **Graceful degradation**: a new AMD card with no ROCm yet falls to Vulkan, then
+  CPU, instead of the whole machine failing.
+
+The generic fallback is per modality, not "Ollama for everything": the LLM
+generic is Ollama, the CV generic is OpenVINO Model Server on the CPU, and so on.
+
+### Device profiles for shipped SKUs
+
+Because the store ships on specific Acer / Asus / MSI SKUs, those machines are
+known ahead of time. A **device profile** is the top rung: a known SKU maps
+directly to a pinned, pre-verified stack, skipping detection guesswork so the
+box is optimal at first boot. Generic detection is the fallback for self-built
+and unknown machines. In short: shipped machines run a profile (fast and known
+good), everything else runs generic detection (works well enough).
+
+### Specialise only where it wins
+
+Every specialised rung is another stack to build, verify on the metal, and
+maintain. Add one only where the win is real: NPU (unusable otherwise),
+aiDAPTIV (cannot run a 120B model otherwise), NVIDIA high throughput
+(vLLM / TensorRT-LLM over Ollama). Ordinary iGPU inference is already good on
+generic Ollama Vulkan; do not fragment the chain for its own sake.
+
 ### Modality to backend, today and next
 
 | Modality | NVIDIA | AMD | Intel | CPU | Capability adapters |
