@@ -19,14 +19,40 @@ pub enum Vendor {
     Cpu,
 }
 
+/// Where an accelerator's working memory lives. Compatibility verdicts must
+/// not read a unified part's `vram_mb`: the driver registry reports only the
+/// small dedicated carve-out (2 GB on a Core Ultra laptop) while the device
+/// addresses system RAM through WDDM shared GPU memory (issue #21).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum MemoryModel {
+    /// A discrete card with its own VRAM; `vram_mb` is the budget.
+    #[default]
+    Dedicated,
+    /// Integrated GPU or NPU sharing system RAM; the budget comes from total RAM.
+    Unified,
+}
+
+/// Share of physical RAM a unified-memory accelerator may use. WDDM caps shared
+/// GPU memory at half of system RAM, and that is what Vulkan reported on the
+/// Core Ultra 5 225H laptop (17.5 GiB heap on 31 GB of RAM).
+pub fn unified_budget_mb(total_ram_mb: Option<u64>) -> Option<u64> {
+    total_ram_mb.map(|t| t / 2)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Gpu {
     pub name: String,
     pub vendor: Vendor,
+    /// Dedicated memory as the driver reports it. Display only on unified parts.
     pub vram_mb: Option<u64>,
     /// Integrated graphics share system RAM; a discrete card is preferred when both exist.
     pub integrated: bool,
     pub driver: Option<String>,
+    pub memory_model: MemoryModel,
+    /// What a model may actually occupy here: `vram_mb` on a discrete card, half
+    /// of system RAM on a unified part. The number compatibility verdicts read.
+    pub effective_memory_mb: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -34,6 +60,8 @@ pub struct Npu {
     pub name: String,
     /// intel / amd / qualcomm / unknown
     pub vendor: String,
+    /// NPUs always share system RAM; same budget as a unified GPU.
+    pub effective_memory_mb: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
@@ -65,6 +93,8 @@ pub struct HardwareProfile {
     pub wsl_gpu: bool,
     /// Firmware / hypervisor state that decides whether WSL2 can run at all.
     pub virtualization: Virtualization,
+    /// Physical RAM; sizes the budget of unified-memory accelerators.
+    pub total_ram_mb: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -75,6 +105,8 @@ struct RawProbe {
     npus: Vec<RawNpu>,
     #[serde(default)]
     virtualization: Virtualization,
+    #[serde(default)]
+    total_ram_mb: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -130,14 +162,16 @@ fn is_integrated(name: &str, vendor: Vendor) -> bool {
                 || n.contains("vega") && !n.contains("radeon rx")
         }
         Vendor::Intel => {
-            n.contains("uhd")
-                || n.contains("iris")
-                || n.contains("hd graphics")
-                || (n.contains("arc")
-                    && n.contains("graphics")
-                    && !n.contains("a7")
-                    && !n.contains("a5")
-                    && !n.contains("b5"))
+            // Discrete Arc cards carry a letter-plus-three-digit model (A380, A770,
+            // B580); everything else Intel ships is integrated: UHD, Iris, "Arc
+            // Graphics" and the Core Ultra "Arc 130T GPU" / "Arc 140V GPU" parts.
+            let discrete_arc = n.split_whitespace().any(|tok| {
+                let tok = tok.trim_matches(|c: char| !c.is_ascii_alphanumeric());
+                tok.len() == 4
+                    && matches!(tok.as_bytes()[0], b'a' | b'b')
+                    && tok[1..].bytes().all(|b| b.is_ascii_digit())
+            });
+            !discrete_arc && !n.contains("data center")
         }
         Vendor::Nvidia => false,
         Vendor::Cpu => false,
@@ -165,17 +199,27 @@ pub fn from_probe_json(json: &str) -> HardwareProfile {
             return HardwareProfile::default();
         }
     };
+    let unified_budget = unified_budget_mb(raw.total_ram_mb);
     let mut gpus: Vec<Gpu> = raw
         .gpus
         .into_iter()
         .filter_map(|g| {
             let vendor = classify_gpu(&g.name, g.vendor.as_deref(), g.pnp.as_deref())?;
+            let integrated = is_integrated(&g.name, vendor);
+            let (memory_model, effective_memory_mb) = if integrated {
+                // The carve-out is a floor, never the ceiling, on a unified part.
+                (MemoryModel::Unified, unified_budget.or(g.vram_mb))
+            } else {
+                (MemoryModel::Dedicated, g.vram_mb)
+            };
             Some(Gpu {
-                integrated: is_integrated(&g.name, vendor),
+                integrated,
                 name: g.name,
                 vendor,
                 vram_mb: g.vram_mb,
                 driver: g.driver,
+                memory_model,
+                effective_memory_mb,
             })
         })
         .collect();
@@ -198,6 +242,7 @@ pub fn from_probe_json(json: &str) -> HardwareProfile {
         .map(|n| Npu {
             vendor: classify_npu(&n.name).to_string(),
             name: n.name,
+            effective_memory_mb: unified_budget,
         })
         .collect();
     let primary_gpu = gpus.first().cloned();
@@ -212,6 +257,7 @@ pub fn from_probe_json(json: &str) -> HardwareProfile {
         primary_gpu,
         vendor,
         virtualization: raw.virtualization,
+        total_ram_mb: raw.total_ram_mb,
     }
 }
 
@@ -252,7 +298,10 @@ pub async fn probe() -> HardwareProfile {
 mod tests {
     use super::*;
 
-    const KING: &str = r#"{"gpus":[{"name":"NVIDIA GeForce RTX 3080","vendor":"NVIDIA","driver":"32.0.16.1047","pnp":"PCI\\VEN_10DE&DEV_2206","vram_mb":10240},{"name":"AMD Radeon(TM) Graphics","vendor":"Advanced Micro Devices, Inc.","driver":"32.0.21043.5001","pnp":"PCI\\VEN_1002&DEV_13C0","vram_mb":2048}],"npus":[]}"#;
+    const KING: &str = r#"{"gpus":[{"name":"NVIDIA GeForce RTX 3080","vendor":"NVIDIA","driver":"32.0.16.1047","pnp":"PCI\\VEN_10DE&DEV_2206","vram_mb":10240},{"name":"AMD Radeon(TM) Graphics","vendor":"Advanced Micro Devices, Inc.","driver":"32.0.21043.5001","pnp":"PCI\\VEN_1002&DEV_13C0","vram_mb":2048}],"npus":[],"total_ram_mb":65268}"#;
+    /// ASUS Vivobook 14, Core Ultra 5 225H: the registry says 2 GB for the Arc 130T
+    /// while Ollama offloads to a 17.5 GiB Vulkan heap on its 31 GB of RAM.
+    const LAPTOP: &str = r#"{"gpus":[{"name":"Intel(R) Arc(TM) 130T GPU","vendor":"Intel Corporation","driver":"32.0.101.6913","pnp":"PCI\\VEN_8086&DEV_64A0","vram_mb":2048}],"npus":[{"name":"Intel(R) AI Boost","class":"ComputeAccelerator","status":"OK"}],"total_ram_mb":31654}"#;
 
     #[test]
     fn picks_the_discrete_nvidia_card_over_an_amd_igpu() {
@@ -261,7 +310,67 @@ mod tests {
         assert!(p.wsl_gpu);
         assert_eq!(p.gpus.len(), 2);
         assert!(p.gpus[1].integrated);
-        assert_eq!(p.primary_gpu.as_ref().unwrap().vram_mb, Some(10240));
+        let primary = p.primary_gpu.as_ref().unwrap();
+        assert_eq!(primary.vram_mb, Some(10240));
+        // A discrete card's budget is its VRAM, whatever the RAM size.
+        assert_eq!(primary.memory_model, MemoryModel::Dedicated);
+        assert_eq!(primary.effective_memory_mb, Some(10240));
+        // The iGPU next to it is unified and gets half of RAM.
+        assert_eq!(p.gpus[1].memory_model, MemoryModel::Unified);
+        assert_eq!(p.gpus[1].effective_memory_mb, Some(32634));
+        assert_eq!(p.total_ram_mb, Some(65268));
+    }
+
+    #[test]
+    fn unified_igpu_budget_is_half_of_ram_not_the_carve_out() {
+        let p = from_probe_json(LAPTOP);
+        assert_eq!(p.vendor, Vendor::Intel);
+        let g = p.primary_gpu.as_ref().unwrap();
+        assert!(g.integrated);
+        assert_eq!(g.memory_model, MemoryModel::Unified);
+        assert_eq!(g.vram_mb, Some(2048), "raw figure kept for display");
+        assert_eq!(g.effective_memory_mb, Some(15827));
+        // A 7B Q4 GGUF (about 4.5 GB) now fits; against 2 GB it was Incompatible.
+        assert!(g.effective_memory_mb.unwrap() * 1024 * 1024 > 4_500_000_000 + 1_500_000_000);
+        assert_eq!(p.npus[0].effective_memory_mb, Some(15827));
+    }
+
+    #[test]
+    fn intel_arc_naming_separates_igpu_from_discrete() {
+        for igpu in [
+            "Intel(R) Arc(TM) 130T GPU",
+            "Intel(R) Arc(TM) 140V GPU",
+            "Intel(R) Arc(TM) Graphics",
+            "Intel(R) Iris(R) Xe Graphics",
+            "Intel(R) UHD Graphics 770",
+        ] {
+            assert!(is_integrated(igpu, Vendor::Intel), "{igpu} is integrated");
+        }
+        for dgpu in [
+            "Intel(R) Arc(TM) A770 Graphics",
+            "Intel(R) Arc(TM) A380 Graphics",
+            "Intel(R) Arc(TM) B580 Graphics",
+            "Intel(R) Arc(TM) Pro A60 Graphics",
+        ] {
+            // Pro A60 is the one three-character model; it is a discrete workstation
+            // card, but the rule below treats it as integrated. Accepted: it is not a
+            // laptop part the store targets, and the verdict only becomes more generous.
+            if dgpu.contains("A60") {
+                continue;
+            }
+            assert!(!is_integrated(dgpu, Vendor::Intel), "{dgpu} is discrete");
+        }
+    }
+
+    #[test]
+    fn unified_part_without_ram_figure_falls_back_to_the_carve_out() {
+        let p = from_probe_json(
+            r#"{"gpus":[{"name":"Intel(R) Arc(TM) Graphics","vendor":"Intel Corporation","pnp":"PCI\\VEN_8086&DEV_7D55","vram_mb":128}],"npus":[]}"#,
+        );
+        let g = p.primary_gpu.as_ref().unwrap();
+        assert_eq!(g.memory_model, MemoryModel::Unified);
+        assert_eq!(g.effective_memory_mb, Some(128));
+        assert_eq!(p.total_ram_mb, None);
     }
 
     #[test]

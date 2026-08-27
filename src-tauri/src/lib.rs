@@ -50,7 +50,7 @@ async fn search_models(
 
 #[tauri::command]
 async fn model_files(state: State<'_, AppState>, repo: String) -> CmdResult<Vec<hf::GgufFile>> {
-    cmd(hf::model_files(&state.http, &repo, state.vram_mb()).await)
+    cmd(hf::model_files(&state.http, &repo, state.memory_budget_mb()).await)
 }
 
 #[tauri::command]

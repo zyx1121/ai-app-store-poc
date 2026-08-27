@@ -69,11 +69,14 @@ impl AppState {
             .unwrap_or(false)
     }
 
-    pub fn vram_mb(&self) -> Option<u64> {
+    /// Memory a model may occupy on the primary accelerator (dedicated VRAM, or
+    /// the shared budget on a unified part). Compatibility verdicts read this,
+    /// never the raw `vram_mb`.
+    pub fn memory_budget_mb(&self) -> Option<u64> {
         self.runtime
             .lock()
             .ok()
-            .and_then(|r| r.as_ref().and_then(|s| s.vram_mb))
+            .and_then(|r| r.as_ref().and_then(|s| s.effective_memory_mb))
     }
 
     pub fn is_ready(&self) -> bool {
