@@ -74,6 +74,8 @@ bun tauri build          # src-tauri/target/release/bundle/msi/*.msi
 
 The layer model this PoC is a slice of, and what a production version adds (fleet, OTA, NPU backends, private registry), is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
+How new AI PCs are supported (the accelerator adapter model and the device onboarding SOP) is in [docs/adr/0001-accelerator-adapters.md](docs/adr/0001-accelerator-adapters.md).
+
 ## Roadmap
 
 - [ ] Pre-baked distro rootfs shipped with the installer instead of provisioning on first run
