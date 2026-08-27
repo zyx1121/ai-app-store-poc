@@ -141,7 +141,7 @@ pub async fn run(state: &AppState, args: &[&str]) -> Result<wsl::Output> {
         Vendor::Nvidia => {
             let joined = args
                 .iter()
-                .map(|a| format!("'{}'", a.replace('\'', "'\\''")))
+                .map(|a| wsl::quote(a))
                 .collect::<Vec<_>>()
                 .join(" ");
             wsl::sh(&format!("ollama {joined}")).await
@@ -160,7 +160,7 @@ pub fn spawn(state: &AppState, args: &[&str]) -> Result<Child> {
         Vendor::Nvidia => {
             let joined = args
                 .iter()
-                .map(|a| format!("'{}'", a.replace('\'', "'\\''")))
+                .map(|a| wsl::quote(a))
                 .collect::<Vec<_>>()
                 .join(" ");
             wsl::spawn_sh(&format!("ollama {joined} 2>&1"))

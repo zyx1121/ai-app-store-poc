@@ -144,7 +144,7 @@ pub fn dockerfile_for(
                     .map(|v| format!("=={v}"))
                     .unwrap_or_default()
             ),
-            format!("python {}", space.app_file),
+            format!("python {}", wsl::quote(&space.app_file)),
             7860,
         ),
         "streamlit" => (
@@ -158,7 +158,8 @@ pub fn dockerfile_for(
             ),
             format!(
                 "streamlit run {} --server.port {} --server.address 0.0.0.0 --server.headless true",
-                space.app_file, space.app_port
+                wsl::quote(&space.app_file),
+                space.app_port
             ),
             space.app_port,
         ),
@@ -334,7 +335,7 @@ mod tests {
         assert!(d.contains("download.pytorch.org/whl/cpu"));
         assert!(d.contains("\"gradio==5.0.0\""));
         assert!(d.contains("--exclude-newer 2023-09-07"));
-        assert!(d.contains("CMD python app.py"));
+        assert!(d.contains("CMD python 'app.py'"));
         let n = dockerfile_for(&space("gradio"), Vendor::Nvidia, Some("3.11"), None).unwrap();
         assert!(!n.contains("whl/cpu"));
         assert!(!n.contains("--exclude-newer"));
@@ -344,7 +345,7 @@ mod tests {
     #[test]
     fn streamlit_and_unknown_sdk() {
         let d = dockerfile_for(&space("streamlit"), Vendor::Cpu, None, None).unwrap();
-        assert!(d.contains("streamlit run app.py --server.port 8501"));
+        assert!(d.contains("streamlit run 'app.py' --server.port 8501"));
         assert!(dockerfile_for(&space("static"), Vendor::Cpu, None, None).is_none());
     }
 
