@@ -7,6 +7,7 @@ mod hardware;
 mod hf;
 mod instances;
 mod ollama;
+mod reconcile;
 mod runtime;
 mod services;
 mod state;
@@ -242,6 +243,9 @@ pub fn run() {
                 }
                 instances::discover(&handle).await;
             });
+            // Re-verify liveness (a dead container, a stopped distro) every
+            // 10 s for as long as the app runs (#68, #69).
+            reconcile::spawn(app.handle().clone());
             Ok(())
         })
         .on_window_event(|window, event| {
