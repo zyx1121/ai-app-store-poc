@@ -8,9 +8,11 @@
 //! Windows processes for the GPU backends WSL2 cannot see (ROCm, XPU, Vulkan),
 //! mirroring how `ollama.rs` already runs natively on non-NVIDIA machines.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -1022,25 +1024,66 @@ pub async fn start(app: AppHandle, id: ServiceId) -> Result<ServiceStatus> {
         }
     }
     let gpu = state.has_gpu();
-    update(&app, id, |st| {
-        st.state = if st.image_present {
+    // Reserve the slot atomically: the busy check above already probed Docker
+    // (it can await for a while), so it alone cannot be the thing that stops
+    // two clicks from both spawning a pull. This transition, and the busy
+    // check right before it, happen under one lock (#39).
+    let reserved = {
+        let mut map = state
+            .services
+            .lock()
+            .map_err(|_| Error::Other("service state poisoned".into()))?;
+        let entry = map.entry(id).or_insert_with(|| current.clone());
+        if matches!(
+            entry.state,
+            ServiceState::Pulling | ServiceState::Starting | ServiceState::Running
+        ) {
+            return Ok(entry.clone());
+        }
+        entry.state = if entry.image_present {
             ServiceState::Starting
         } else {
             ServiceState::Pulling
         };
-        st.error = None;
-    });
+        entry.error = None;
+        entry.clone()
+    };
+    let _ = app.emit(UPDATE_EVENT, reserved.clone());
+    let cancel = state.begin_service_launch(id);
     let app2 = app.clone();
     tokio::spawn(async move {
         let r = match s.runtime {
-            Runtime::Container { .. } => run_container(&app2, s, gpu).await,
-            Runtime::Native { .. } => run_native(&app2, s).await,
+            Runtime::Container { .. } => run_container(&app2, s, gpu, &cancel).await,
+            Runtime::Native { .. } => run_native(&app2, s, &cancel).await,
         };
         if let Err(e) = r {
-            fail(&app2, id, e.to_string());
+            if cancel.load(Ordering::SeqCst) {
+                let state = app2.state::<AppState>();
+                match s.runtime {
+                    Runtime::Container { container, .. } => {
+                        let _ = wsl::sh(&format!("docker rm -f {container} >/dev/null")).await;
+                    }
+                    Runtime::Native { .. } => {
+                        let _ = stop_native_process(&state, id, s.host_port).await;
+                    }
+                }
+                log::info!("service {id:?}: launch cancelled by stop");
+            } else {
+                fail(&app2, id, e.to_string());
+            }
         }
+        app2.state::<AppState>().end_service_launch(id, &cancel);
     });
-    get(&state, id).ok_or_else(|| Error::Other("service status missing".into()))
+    Ok(reserved)
+}
+
+/// Has the in-flight launch been told to stop?
+fn cancelled(cancel: &Arc<AtomicBool>) -> bool {
+    cancel.load(Ordering::SeqCst)
+}
+
+fn cancelled_err() -> Error {
+    Error::Other("launch cancelled".into())
 }
 
 /// Poll the health URL until it answers 2xx. `alive` reports whether the process is
@@ -1049,6 +1092,7 @@ async fn wait_healthy<F, Fut>(
     app: &AppHandle,
     s: &ServiceSpec,
     ticks: u32,
+    cancel: &Arc<AtomicBool>,
     mut alive: F,
 ) -> Result<()>
 where
@@ -1057,6 +1101,9 @@ where
 {
     for tick in 0..ticks {
         tokio::time::sleep(Duration::from_secs(2)).await;
+        if cancelled(cancel) {
+            return Err(cancelled_err());
+        }
         if health_ok(s.host_port, s.health_path).await {
             update(app, s.id, |st| st.state = ServiceState::Running);
             push_log(app, s.id, "healthy".into());
@@ -1073,7 +1120,12 @@ where
     ))
 }
 
-async fn run_container(app: &AppHandle, s: &ServiceSpec, gpu: bool) -> Result<()> {
+async fn run_container(
+    app: &AppHandle,
+    s: &ServiceSpec,
+    gpu: bool,
+    cancel: &Arc<AtomicBool>,
+) -> Result<()> {
     let Runtime::Container {
         image,
         container,
@@ -1110,12 +1162,18 @@ async fn run_container(app: &AppHandle, s: &ServiceSpec, gpu: bool) -> Result<()
             st.state = ServiceState::Starting;
         });
     }
+    if cancelled(cancel) {
+        return Err(cancelled_err());
+    }
 
     if model_store.is_some() {
         // The server must find a valid (possibly empty) index on its first start.
         wsl::sh(&store_index_script(ov_target_device(s)))
             .await?
             .require("prepare model store")?;
+    }
+    if cancelled(cancel) {
+        return Err(cancelled_err());
     }
 
     let gpu_flag = if gpu && wants_gpu { "--gpus all" } else { "" };
@@ -1138,8 +1196,11 @@ async fn run_container(app: &AppHandle, s: &ServiceSpec, gpu: bool) -> Result<()
     );
     push_log(app, id, format!("docker run {publish} {image}"));
     wsl::sh(&run).await?.require("docker run")?;
+    if cancelled(cancel) {
+        return Err(cancelled_err());
+    }
 
-    wait_healthy(app, s, 90, || async {
+    wait_healthy(app, s, 90, cancel, || async {
         let probe = format!(
             "docker inspect -f '{{{{.State.Running}}}}' {container} 2>/dev/null; docker logs --tail 3 {container} 2>&1"
         );
@@ -1158,7 +1219,7 @@ async fn run_container(app: &AppHandle, s: &ServiceSpec, gpu: bool) -> Result<()
     .await
 }
 
-async fn run_native(app: &AppHandle, s: &ServiceSpec) -> Result<()> {
+async fn run_native(app: &AppHandle, s: &ServiceSpec, cancel: &Arc<AtomicBool>) -> Result<()> {
     let Runtime::Native {
         downloads,
         exe,
@@ -1192,6 +1253,9 @@ async fn run_native(app: &AppHandle, s: &ServiceSpec) -> Result<()> {
             st.state = ServiceState::Starting;
         });
     }
+    if cancelled(cancel) {
+        return Err(cancelled_err());
+    }
 
     // A native OVMS server needs a valid ovms.json before it starts; write it from
     // whatever detectors are installed (an empty list is valid and hot-fills later).
@@ -1200,8 +1264,13 @@ async fn run_native(app: &AppHandle, s: &ServiceSpec) -> Result<()> {
     }
 
     // Anything already listening on our port (a server left over from an earlier
-    // session) would make the new process exit; stop it first.
-    stop_native_process(&state, id, s.host_port).await;
+    // session) would make the new process exit; stop it first. Its executable
+    // must live under our runtime dir, or this errors instead of killing an
+    // unrelated Windows process (#71).
+    stop_native_process(&state, id, s.host_port).await?;
+    if cancelled(cancel) {
+        return Err(cancelled_err());
+    }
 
     push_log(
         app,
@@ -1264,7 +1333,10 @@ async fn run_native(app: &AppHandle, s: &ServiceSpec) -> Result<()> {
     }
 
     // Portable ComfyUI unpacks and imports a lot on first start; allow six minutes.
-    wait_healthy(app, s, 180, || async { native_child_alive(&state, id) }).await
+    wait_healthy(app, s, 180, cancel, || async {
+        native_child_alive(&state, id)
+    })
+    .await
 }
 
 /// One log line from raw process output: lossy UTF-8, and for a progress bar
@@ -1275,8 +1347,20 @@ fn log_line(bytes: &[u8]) -> Option<String> {
     (!last.is_empty()).then(|| last.to_string())
 }
 
-/// Kill the native process we own, or whatever still listens on the port.
-async fn stop_native_process(state: &AppState, id: ServiceId, port: u16) {
+/// Is `path` (a Windows path as `Get-Process` reports it) inside `dir` (our
+/// runtime dir for this service)? Compared case-insensitively with slashes
+/// normalised: Windows paths are not case sensitive and PowerShell may quote
+/// either style. Pure so it is unit-testable without a live process (#71).
+fn path_under_runtime_dir(path: &str, dir: &Path) -> bool {
+    let normalize = |s: &str| s.replace('/', "\\").to_ascii_lowercase();
+    normalize(path).starts_with(&normalize(&dir.to_string_lossy()))
+}
+
+/// Kill the native process we own, or whatever still listens on the port only
+/// if it is one of ours: its executable lives under this service's runtime
+/// dir. Anything else is left alone and reported so a real port conflict is
+/// visible instead of a random Windows process silently dying (#71).
+async fn stop_native_process(state: &AppState, id: ServiceId, port: u16) -> Result<()> {
     let child = state
         .native_services
         .lock()
@@ -1286,31 +1370,86 @@ async fn stop_native_process(state: &AppState, id: ServiceId, port: u16) {
         let _ = child.start_kill();
         let _ = child.wait().await;
     }
-    if health_ok(port, "/").await
+    if !(health_ok(port, "/").await
         || tokio::net::TcpStream::connect(("127.0.0.1", port))
             .await
-            .is_ok()
+            .is_ok())
     {
-        let script = format!(
-            "Get-NetTCPConnection -LocalPort {port} -State Listen -ErrorAction SilentlyContinue | \
-             ForEach-Object {{ Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }}"
-        );
-        let _ = wsl::run(
-            "powershell.exe",
-            &["-NoProfile", "-NonInteractive", "-Command", &script],
-        )
-        .await;
+        return Ok(());
     }
+    let script = format!(
+        "$c = Get-NetTCPConnection -LocalPort {port} -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1; \
+         if ($c) {{ $p = Get-Process -Id $c.OwningProcess -ErrorAction SilentlyContinue; \
+         if ($p) {{ Write-Output \"PID=$($p.Id)\"; Write-Output \"NAME=$($p.ProcessName)\"; Write-Output \"PATH=$($p.Path)\" }} }}"
+    );
+    let out = wsl::run(
+        "powershell.exe",
+        &["-NoProfile", "-NonInteractive", "-Command", &script],
+    )
+    .await?;
+    let mut pid: Option<&str> = None;
+    let mut name: Option<&str> = None;
+    let mut path: Option<&str> = None;
+    for line in out.stdout.lines() {
+        if let Some(v) = line.strip_prefix("PID=") {
+            pid = Some(v.trim());
+        } else if let Some(v) = line.strip_prefix("NAME=") {
+            name = Some(v.trim());
+        } else if let Some(v) = line.strip_prefix("PATH=") {
+            path = Some(v.trim());
+        }
+    }
+    let Some(pid) = pid.filter(|p| !p.is_empty()) else {
+        // Nothing owns the port anymore (it closed between the two checks).
+        return Ok(());
+    };
+    let owned = path
+        .filter(|p| !p.is_empty())
+        .and_then(|p| {
+            native_dir(id)
+                .ok()
+                .map(|dir| path_under_runtime_dir(p, &dir))
+        })
+        .unwrap_or(false);
+    if !owned {
+        let who = name
+            .filter(|n| !n.is_empty())
+            .unwrap_or("an unknown process");
+        log::warn!(
+            "service {id:?}: port {port} is used by {who} (pid {pid}), not our process; leaving it alone"
+        );
+        return Err(Error::Other(format!("port {port} is used by {who}")));
+    }
+    log::info!(
+        "service {id:?}: killing our leftover process {} (pid {pid})",
+        name.unwrap_or("?")
+    );
+    let kill = format!("Stop-Process -Id {pid} -Force -ErrorAction SilentlyContinue");
+    let _ = wsl::run(
+        "powershell.exe",
+        &["-NoProfile", "-NonInteractive", "-Command", &kill],
+    )
+    .await;
+    Ok(())
 }
 
 pub async fn stop(app: AppHandle, id: ServiceId) -> Result<()> {
     let state = app.state::<AppState>();
     let s = require_spec(id, selector(&state))?;
+    state.cancel_service_launch(id);
     match s.runtime {
         Runtime::Container { container, .. } => {
-            let _ = wsl::sh(&format!("docker rm -f {container} >/dev/null 2>&1")).await;
+            // `docker rm` failing must not be reported as a successful stop
+            // (#34): the container, and any GPU memory it holds, is still there.
+            if let Err(e) = wsl::sh(&format!("docker rm -f {container} >/dev/null"))
+                .await
+                .and_then(|o| o.require("docker rm"))
+            {
+                update(&app, id, |st| st.error = Some(e.to_string()));
+                return Err(e);
+            }
         }
-        Runtime::Native { .. } => stop_native_process(&state, id, s.host_port).await,
+        Runtime::Native { .. } => stop_native_process(&state, id, s.host_port).await?,
     }
     update(&app, id, |st| {
         st.state = if st.image_present {
@@ -1321,6 +1460,97 @@ pub async fn stop(app: AppHandle, id: ServiceId) -> Result<()> {
         st.error = None;
     });
     Ok(())
+}
+
+// ---- reconcile --------------------------------------------------------------
+// A periodic check for services whose container died, or was stopped, behind
+// the app's back (#68). See `reconcile.rs` for the loop itself.
+
+/// Container-runtime services believed to be running, paired with their
+/// container name: what the reconcile loop needs to fold into the same single
+/// `docker ps` liveness check it uses for instances.
+pub fn running_containers(state: &AppState) -> Vec<(ServiceId, String)> {
+    let sel = selector(state);
+    state
+        .services
+        .lock()
+        .map(|m| {
+            m.iter()
+                .filter(|(_, st)| st.state == ServiceState::Running && st.runtime == "container")
+                .filter_map(|(id, _)| match spec(*id, sel)?.runtime {
+                    Runtime::Container { container, .. } => Some((*id, container.to_string())),
+                    Runtime::Native { .. } => None,
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Native services believed to be running: the reconcile loop re-checks these
+/// with the existing health probe (no `docker ps` needed).
+pub fn running_native(state: &AppState) -> Vec<ServiceId> {
+    state
+        .services
+        .lock()
+        .map(|m| {
+            m.iter()
+                .filter(|(_, st)| st.state == ServiceState::Running && st.runtime == "native")
+                .map(|(id, _)| *id)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// A tracked service's container is gone; flip it to Error.
+pub fn mark_container_gone(app: &AppHandle, id: ServiceId) {
+    fail(app, id, "container exited".into());
+}
+
+/// Re-probe a native service that was believed running: still there (our
+/// tracked child, or something answering health) or gone.
+pub async fn recheck_native(app: &AppHandle, id: ServiceId) {
+    let state = app.state::<AppState>();
+    let Some(s) = spec(id, selector(&state)) else {
+        return;
+    };
+    let alive = native_child_alive(&state, id) || health_ok(s.host_port, s.health_path).await;
+    if !alive {
+        log::warn!("service {id:?}: native process is gone; marking Stopped");
+        update(app, id, |st| {
+            st.state = ServiceState::Stopped;
+            st.error = None;
+        });
+    }
+}
+
+/// The WSL2 distro stopped: every container-runtime service is gone with it.
+/// Native services run on Windows and are unaffected (#69).
+pub fn mark_all_down_by_distro_loss(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    let ids: Vec<ServiceId> = state
+        .services
+        .lock()
+        .map(|m| {
+            m.iter()
+                .filter(|(_, st)| {
+                    st.runtime == "container"
+                        && matches!(
+                            st.state,
+                            ServiceState::Pulling | ServiceState::Starting | ServiceState::Running
+                        )
+                })
+                .map(|(id, _)| *id)
+                .collect()
+        })
+        .unwrap_or_default();
+    for id in ids {
+        state.cancel_service_launch(id);
+        log::warn!("service {id:?}: WSL distro stopped; marking Stopped");
+        update(app, id, |st| {
+            st.state = ServiceState::Stopped;
+            st.error = Some("WSL distro stopped".into());
+        });
+    }
 }
 
 #[cfg(test)]
@@ -1538,5 +1768,30 @@ mod tests {
             store_relative("/models", "/models/repo/yolov10n/1/model.onnx"),
             "/repo/yolov10n/1/model.onnx"
         );
+    }
+
+    /// `stop_native_process` only kills a process whose executable lives under
+    /// the service's own runtime dir; anything else is a different program
+    /// that happens to share the port (#71).
+    #[test]
+    fn path_under_runtime_dir_matches_only_our_install() {
+        let dir = std::path::Path::new(r"C:\Users\me\AppData\Local\ai-app-store\services\whisper");
+        assert!(path_under_runtime_dir(
+            r"C:\Users\me\AppData\Local\ai-app-store\services\whisper\whisper-server.exe",
+            dir
+        ));
+        // Case and slash-style differences PowerShell can hand back must not matter.
+        assert!(path_under_runtime_dir(
+            r"c:\users\me\appdata\local\ai-app-store\services\whisper\whisper-server.exe",
+            dir
+        ));
+        assert!(!path_under_runtime_dir(
+            r"C:\Windows\System32\svchost.exe",
+            dir
+        ));
+        assert!(!path_under_runtime_dir(
+            r"C:\Users\me\AppData\Local\Programs\Steam\steam.exe",
+            dir
+        ));
     }
 }
