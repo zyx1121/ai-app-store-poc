@@ -12,6 +12,7 @@ use tauri::{AppHandle, Emitter, Manager};
 
 use crate::build;
 use crate::error::{Error, Result};
+use crate::gpu;
 use crate::hf;
 use crate::ollama;
 use crate::state::AppState;
@@ -25,6 +26,7 @@ const CONTAINER_PREFIX: &str = "aias-";
 /// volume means the second run of any Space (or a restart) skips the download.
 const HF_CACHE_VOLUME: &str = "aias-hf-cache";
 pub const OLLAMA_PORT: u16 = 11434;
+const MB: u64 = 1024 * 1024;
 
 /// The three bases a published Space port may answer on, same WSL2 quirk
 /// `ollama.rs` already works around: the Windows side of localhost forwarding
@@ -75,6 +77,15 @@ pub struct Instance {
     /// residents (#58)
     #[serde(default)]
     pub gpu: bool,
+    /// Size of the image being (or about to be) pulled, from `docker manifest
+    /// inspect`, in MB. `None` when unknown (build, already pulled, or the
+    /// registry did not answer) (#55).
+    #[serde(default)]
+    pub pull_size_mb: Option<u64>,
+    /// Aggregate `docker pull` progress across layers, 0..100. `None` outside
+    /// `Pulling` (#55).
+    #[serde(default)]
+    pub progress_pct: Option<u32>,
 }
 
 fn now() -> String {
@@ -159,6 +170,7 @@ pub async fn launch_space(
     app: AppHandle,
     id: String,
     secrets: HashMap<String, String>,
+    lease_id: Option<String>,
 ) -> Result<Instance> {
     let state = app.state::<AppState>();
     require_ready(&state)?;
@@ -170,6 +182,11 @@ pub async fn launch_space(
                 .unwrap_or_else(|| "Space is not compatible".into()),
         ));
     }
+    // Only a GPU-tier Space contends for the shared budget (#70); a CPU-tier
+    // Space (which the frontend never gates) needs no lease.
+    if state.has_gpu() && space.wants_gpu() {
+        gpu::require_lease(&state, lease_id.as_deref(), state.memory_budget_mb())?;
+    }
 
     start_space(app, space, false, secrets).await
 }
@@ -180,12 +197,16 @@ pub async fn build_space(
     app: AppHandle,
     id: String,
     secrets: HashMap<String, String>,
+    lease_id: Option<String>,
 ) -> Result<Instance> {
     let state = app.state::<AppState>();
     require_ready(&state)?;
     let space = hf::space(state.inner(), &id).await?;
     if matches!(space.sdk.as_deref(), Some("static")) {
         return Err(Error::Other("static Spaces have nothing to build".into()));
+    }
+    if state.has_gpu() && space.wants_gpu() {
+        gpu::require_lease(&state, lease_id.as_deref(), state.memory_budget_mb())?;
     }
     start_space(app, space, true, secrets).await
 }
@@ -220,6 +241,8 @@ async fn start_space(
         started_at: now(),
         local_build,
         gpu,
+        pull_size_mb: None,
+        progress_pct: None,
     };
     // The busy check and the reservation happen under one lock: two concurrent
     // launches for the same Space must not both pass the check and both spawn
@@ -312,6 +335,130 @@ fn cancelled_err() -> Error {
     Error::Other("launch cancelled".into())
 }
 
+/// Sum of layer sizes for an image's manifest, in MB. Best effort: a registry
+/// answering with a manifest list (multi-arch) is followed one level for the
+/// `linux/amd64` platform; anything else (private, gated, unreachable) is
+/// `None` and the pull just shows raw log lines, same as before (#55).
+async fn image_size_mb(image: &str) -> Option<u64> {
+    let sum_layers = |v: &serde_json::Value| -> Option<u64> {
+        let layers = v.get("layers")?.as_array()?;
+        Some(
+            layers
+                .iter()
+                .filter_map(|l| l.get("size").and_then(|s| s.as_u64()))
+                .sum::<u64>()
+                / MB,
+        )
+    };
+    let out = wsl::sh(&format!("docker manifest inspect {image} 2>/dev/null"))
+        .await
+        .ok()?;
+    if !out.ok() {
+        return None;
+    }
+    let v: serde_json::Value = serde_json::from_str(&out.stdout).ok()?;
+    if let Some(mb) = sum_layers(&v) {
+        return Some(mb);
+    }
+    let manifests = v.get("manifests")?.as_array()?;
+    let is_amd64_linux = |m: &&serde_json::Value| {
+        let p = m.get("platform");
+        p.and_then(|p| p.get("architecture"))
+            .and_then(|a| a.as_str())
+            == Some("amd64")
+            && p.and_then(|p| p.get("os")).and_then(|o| o.as_str()) == Some("linux")
+    };
+    let digest = manifests
+        .iter()
+        .find(is_amd64_linux)
+        .or_else(|| manifests.first())?
+        .get("digest")?
+        .as_str()?;
+    let (name, _) = image.rsplit_once(':').unwrap_or((image, "latest"));
+    let out2 = wsl::sh(&format!(
+        "docker manifest inspect {name}@{digest} 2>/dev/null"
+    ))
+    .await
+    .ok()?;
+    if !out2.ok() {
+        return None;
+    }
+    let v2: serde_json::Value = serde_json::from_str(&out2.stdout).ok()?;
+    sum_layers(&v2)
+}
+
+/// Cached `image_size_mb`, keyed by image reference so a re-launch or a second
+/// Browse card for the same image skips the round trip (#55).
+async fn cached_image_size_mb(state: &AppState, image: &str) -> Option<u64> {
+    if let Some(mb) = state
+        .image_sizes_mb
+        .lock()
+        .ok()
+        .and_then(|m| m.get(image).copied())
+    {
+        return Some(mb);
+    }
+    let mb = image_size_mb(image).await?;
+    if let Ok(mut m) = state.image_sizes_mb.lock() {
+        m.insert(image.to_string(), mb);
+    }
+    Some(mb)
+}
+
+/// Parse a decimal size with a `B`/`kB`/`MB`/`GB` suffix, as `docker pull`
+/// prints them (`1.234MB`, `45.2MB`, `512B`).
+fn parse_pull_size(s: &str) -> Option<u64> {
+    let s = s.trim();
+    let split = s.find(|c: char| c.is_ascii_alphabetic())?;
+    let (num, unit) = s.split_at(split);
+    let n: f64 = num.trim().parse().ok()?;
+    let mult = match unit.trim().to_ascii_uppercase().as_str() {
+        "B" => 1.0,
+        "KB" => 1024.0,
+        "MB" => 1024.0 * 1024.0,
+        "GB" => 1024.0 * 1024.0 * 1024.0,
+        _ => return None,
+    };
+    Some((n * mult).round() as u64)
+}
+
+/// Fold one `docker pull` log line into `layers` (keyed by the short layer id
+/// docker prints) and return the aggregate percent across every layer seen so
+/// far, when it can be computed (#55).
+fn parse_pull_progress(line: &str, layers: &mut HashMap<String, (u64, u64)>) -> Option<u32> {
+    let (id, rest) = line.split_once(':')?;
+    let id = id.trim();
+    if id.is_empty() || !id.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    let rest = rest.trim();
+    if let Some(bar) = rest.strip_prefix("Downloading ") {
+        let nums = bar.rsplit(']').next().unwrap_or(bar).trim();
+        let (cur, tot) = nums.split_once('/')?;
+        let cur = parse_pull_size(cur)?;
+        let tot = parse_pull_size(tot)?;
+        layers.insert(id.to_string(), (cur, tot));
+    } else if rest.starts_with("Download complete") || rest.starts_with("Pull complete") {
+        if let Some(v) = layers.get_mut(id) {
+            v.0 = v.1;
+        }
+    } else {
+        return None;
+    }
+    let (done, total) = layers
+        .values()
+        .fold((0u64, 0u64), |(d, t), (c, n)| (d + c, t + n));
+    (total > 0).then(|| ((done as f64 / total as f64) * 100.0).min(100.0) as u32)
+}
+
+/// Size of a Space's registry image, in MB, without pulling it. For the
+/// Browse card badge; the launch path calls `cached_image_size_mb` itself,
+/// right before the pull it is about to do anyway (#55).
+pub async fn space_image_size(app: &AppHandle, id: &str) -> Option<u64> {
+    let image = format!("registry.hf.space/{}:latest", slug(id));
+    cached_image_size_mb(&app.state::<AppState>(), &image).await
+}
+
 // `cancel` (#35/#76) and `secrets` (#57) each added one parameter on top of
 // the existing five; a struct would help but is out of scope for this fix.
 #[allow(clippy::too_many_arguments)]
@@ -328,9 +475,22 @@ async fn run_space(
     let cname = container_name(id);
     let app_port = space.app_port;
     if pull {
+        if let Some(mb) = cached_image_size_mb(&app.state::<AppState>(), image).await {
+            update(app, id, |i| i.pull_size_mb = Some(mb));
+            push_log(app, id, format!("{:.1} GB image", mb as f64 / 1024.0));
+        }
         push_log(app, id, format!("docker pull {image}"));
+        update(app, id, |i| i.progress_pct = Some(0));
         let child = wsl::spawn_sh(&format!("docker pull {image} 2>&1"))?;
-        let code = wsl::stream_lines(child, |l| push_log(app, id, l)).await?;
+        let mut layers: HashMap<String, (u64, u64)> = HashMap::new();
+        let code = wsl::stream_lines(child, |l| {
+            if let Some(pct) = parse_pull_progress(&l, &mut layers) {
+                update(app, id, |i| i.progress_pct = Some(pct));
+            }
+            push_log(app, id, l);
+        })
+        .await?;
+        update(app, id, |i| i.progress_pct = None);
         if code != 0 {
             return Err(Error::Other(format!(
                 "image pull failed ({code}); the Space may be private, gated, or have no image. Try Build locally."
@@ -487,6 +647,11 @@ async fn wait_for_http(
             if let Ok(o) = wsl::sh(&probe).await {
                 let mut lines = o.stdout.lines();
                 let running = lines.next().map(str::trim) == Some("true");
+                // Some Spaces preload more than the card has (MusicGen imports 10
+                // variants at once) and only OOM on the first real `.to('cuda')`,
+                // well after the container reports itself alive; catch that instead
+                // of holding the whole GPU for up to 60 min (#53).
+                let mut oom = false;
                 for l in lines {
                     // Gated repos die deep in a download traceback; surfacing
                     // just this fails fast with something the user can act on
@@ -496,7 +661,28 @@ async fn wait_for_http(
                             "needs a Hugging Face token with access to {repo}; see https://huggingface.co/{repo}"
                         )));
                     }
+                    if l.contains("CUDA out of memory")
+                        || l.contains("OutOfMemoryError")
+                        || l.contains("CUDA error: out of memory")
+                    {
+                        oom = true;
+                    }
                     push_log(app, id, l.to_string());
+                }
+                if oom {
+                    let _ = wsl::sh(&format!("docker rm -f {cname} >/dev/null 2>&1")).await;
+                    let free_mb = wsl::sh(
+                        "/usr/lib/wsl/lib/nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits 2>/dev/null | head -1",
+                    )
+                    .await
+                    .ok()
+                    .and_then(|o| o.stdout.trim().parse::<u64>().ok());
+                    return Err(Error::Other(match free_mb {
+                        Some(mb) => {
+                            format!("needs more GPU memory than this device has ({mb} MB free)")
+                        }
+                        None => "needs more GPU memory than this device has".into(),
+                    }));
                 }
                 if !running {
                     return Err(Error::Other(
@@ -514,9 +700,17 @@ async fn wait_for_http(
 
 // ---- Models ---------------------------------------------------------------
 
-pub async fn launch_model(app: AppHandle, repo: String, quant: String) -> Result<Instance> {
+pub async fn launch_model(
+    app: AppHandle,
+    repo: String,
+    quant: String,
+    lease_id: Option<String>,
+) -> Result<Instance> {
     let state = app.state::<AppState>();
     require_ready(&state)?;
+    // A model always contends for the shared budget when one exists (#70); the
+    // frontend gates every model launch through `gpu_plan` unconditionally.
+    gpu::require_lease(&state, lease_id.as_deref(), state.memory_budget_mb())?;
     if quant.is_empty()
         || !quant
             .chars()
@@ -555,6 +749,8 @@ pub async fn launch_model(app: AppHandle, repo: String, quant: String) -> Result
         started_at: now(),
         local_build: false,
         gpu: false,
+        pull_size_mb: None,
+        progress_pct: None,
     };
     // Same atomicity requirement as `start_space` (#39): the busy check and
     // the reservation happen under one lock.
@@ -792,6 +988,8 @@ pub async fn discover(app: &AppHandle) {
                 started_at: now(),
                 local_build: false,
                 gpu: parts.get(4).map(|g| g.trim() == "1").unwrap_or(false),
+                pull_size_mb: None,
+                progress_pct: None,
             },
         );
         if let Some(inst) = get(&state, &id) {
@@ -867,7 +1065,41 @@ pub fn mark_all_stopped_by_distro_loss(app: &AppHandle) {
 
 #[cfg(test)]
 mod tests {
-    use super::{candidate_bases, space_command};
+    use super::{candidate_bases, parse_pull_progress, parse_pull_size, space_command};
+    use std::collections::HashMap;
+
+    #[test]
+    fn parses_docker_pull_sizes() {
+        assert_eq!(parse_pull_size("12.3MB"), Some(12_897_485));
+        assert_eq!(parse_pull_size("512B"), Some(512));
+        assert_eq!(parse_pull_size("1.5GB"), Some(1_610_612_736));
+        assert_eq!(parse_pull_size("nonsense"), None);
+    }
+
+    #[test]
+    fn aggregates_pull_progress_across_layers() {
+        let mut layers = HashMap::new();
+        // One layer half done: 5MB of 10MB.
+        assert_eq!(
+            parse_pull_progress("a1b2c3: Downloading [====>    ]  5MB/10MB", &mut layers),
+            Some(50)
+        );
+        // A second, just-started layer joins the aggregate: 5 / (10 + 20) MB.
+        assert_eq!(
+            parse_pull_progress("d4e5f6: Downloading [>         ]  0B/20MB", &mut layers),
+            Some(16)
+        );
+        // "Download complete" fills the layer's total in.
+        assert_eq!(
+            parse_pull_progress("a1b2c3: Download complete", &mut layers),
+            Some(33)
+        );
+        // Unrelated lines (image name, "Pulling fs layer") do not move it.
+        assert_eq!(
+            parse_pull_progress("latest: Pulling from owner/space", &mut layers),
+            None
+        );
+    }
 
     #[test]
     fn derives_start_command() {
