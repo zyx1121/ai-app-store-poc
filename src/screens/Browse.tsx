@@ -117,12 +117,19 @@ export function Browse({ onLaunched }: { onLaunched: () => void }) {
   const [consentDontAskAgain, setConsentDontAskAgain] = useState(false);
   const buildConsentResolve = useRef<((choice: BuildConsent) => void) | null>(null);
 
+  // Which query each tab last fetched (or is fetching); `null` means never.
+  // Comparing against `debouncedQuery` is what makes the other tab's search
+  // lazy: it only runs once the user actually selects it (#67).
+  const [spacesQuery, setSpacesQuery] = useState<string | null>(null);
+  const [modelsQuery, setModelsQuery] = useState<string | null>(null);
+
   useEffect(() => {
     const t = setTimeout(() => setDebouncedQuery(query), 400);
     return () => clearTimeout(t);
   }, [query]);
 
   useEffect(() => {
+    if (tab !== "apps" || spacesQuery === debouncedQuery) return;
     let cancelled = false;
     setSpacesState("loading");
     searchSpaces(debouncedQuery)
@@ -130,6 +137,7 @@ export function Browse({ onLaunched }: { onLaunched: () => void }) {
         if (cancelled) return;
         setSpaces(res);
         setSpacesState("idle");
+        setSpacesQuery(debouncedQuery);
       })
       .catch((e: unknown) => {
         if (cancelled) return;
@@ -139,9 +147,10 @@ export function Browse({ onLaunched }: { onLaunched: () => void }) {
     return () => {
       cancelled = true;
     };
-  }, [debouncedQuery]);
+  }, [tab, debouncedQuery, spacesQuery]);
 
   useEffect(() => {
+    if (tab !== "models" || modelsQuery === debouncedQuery) return;
     let cancelled = false;
     setModelsState("loading");
     searchModels(debouncedQuery)
@@ -149,6 +158,7 @@ export function Browse({ onLaunched }: { onLaunched: () => void }) {
         if (cancelled) return;
         setModels(res);
         setModelsState("idle");
+        setModelsQuery(debouncedQuery);
       })
       .catch((e: unknown) => {
         if (cancelled) return;
@@ -158,7 +168,7 @@ export function Browse({ onLaunched }: { onLaunched: () => void }) {
     return () => {
       cancelled = true;
     };
-  }, [debouncedQuery]);
+  }, [tab, debouncedQuery, modelsQuery]);
 
   useEffect(() => {
     if (!dialogModel) return;
@@ -189,7 +199,7 @@ export function Browse({ onLaunched }: { onLaunched: () => void }) {
     return !!space.hardware && !space.hardware.startsWith("cpu");
   }
 
-  async function runSpace(space: SpaceSummary) {
+  async function runSpace(space: SpaceSummary, env?: Record<string, string>) {
     setLaunchError(null);
     setLaunchingId(space.id);
     try {
@@ -198,7 +208,7 @@ export function Browse({ onLaunched }: { onLaunched: () => void }) {
         !(await gate({ kind: "space", id: space.id }, space.title ?? space.name))
       )
         return;
-      await launchSpace(space.id);
+      await launchSpace(space.id, env);
       onLaunched();
     } catch (e) {
       setLaunchError(String(e));
@@ -238,7 +248,7 @@ export function Browse({ onLaunched }: { onLaunched: () => void }) {
     resolve?.({ proceed, useRepoDockerfile: consentUseRepoDockerfile });
   }
 
-  async function runBuildSpace(space: SpaceSummary) {
+  async function runBuildSpace(space: SpaceSummary, env?: Record<string, string>) {
     setLaunchError(null);
     setBuildingId(space.id);
     try {
@@ -249,13 +259,44 @@ export function Browse({ onLaunched }: { onLaunched: () => void }) {
         return;
       const { proceed, useRepoDockerfile } = await confirmBuildLocally(space);
       if (!proceed) return;
-      await buildSpace(space.id, useRepoDockerfile);
+      await buildSpace(space.id, useRepoDockerfile, env);
       onLaunched();
     } catch (e) {
       setLaunchError(String(e));
     } finally {
       setBuildingId(null);
     }
+  }
+
+  // A Space that needs secrets (#57) is never launched directly: the button
+  // opens this dialog first so the user can supply values.
+  const [envDialogSpace, setEnvDialogSpace] = useState<SpaceSummary | null>(null);
+  const [envDialogKind, setEnvDialogKind] = useState<"run" | "build" | null>(null);
+  const [envValues, setEnvValues] = useState<Record<string, string>>({});
+
+  function startLaunch(space: SpaceSummary, kind: "run" | "build") {
+    if (space.secrets.length > 0) {
+      setEnvDialogSpace(space);
+      setEnvDialogKind(kind);
+      setEnvValues(Object.fromEntries(space.secrets.map((name) => [name, ""])));
+      return;
+    }
+    if (kind === "run") runSpace(space);
+    else runBuildSpace(space);
+  }
+
+  function closeEnvDialog() {
+    setEnvDialogSpace(null);
+    setEnvDialogKind(null);
+  }
+
+  async function confirmEnvLaunch() {
+    if (!envDialogSpace || !envDialogKind) return;
+    const space = envDialogSpace;
+    const kind = envDialogKind;
+    closeEnvDialog();
+    if (kind === "run") await runSpace(space, envValues);
+    else await runBuildSpace(space, envValues);
   }
 
   async function confirmLaunchModel() {
@@ -338,12 +379,17 @@ export function Browse({ onLaunched }: { onLaunched: () => void }) {
                     {space.sdk && <Badge variant="outline">{space.sdk}</Badge>}
                     <span>{formatCount(space.likes)} likes</span>
                     {space.hardware && <span>{space.hardware}</span>}
+                    {space.secrets.length > 0 && (
+                      <span className="w-full text-amber-600 dark:text-amber-500">
+                        Needs secrets: {space.secrets.join(", ")}
+                      </span>
+                    )}
                   </CardContent>
                   <CardFooter className="flex gap-2">
                     <Button
                       className="flex-1"
                       disabled={space.compat === "incompatible" || launchingId === space.id}
-                      onClick={() => runSpace(space)}
+                      onClick={() => startLaunch(space, "run")}
                     >
                       {launchingId === space.id ? "Launching..." : "Run"}
                     </Button>
@@ -358,7 +404,7 @@ export function Browse({ onLaunched }: { onLaunched: () => void }) {
                                 (space.compat === "incompatible" &&
                                   (space.compat_reason?.toLowerCase().includes("static") ?? false))
                               }
-                              onClick={() => runBuildSpace(space)}
+                              onClick={() => startLaunch(space, "build")}
                             />
                           }
                         >
@@ -528,6 +574,47 @@ export function Browse({ onLaunched }: { onLaunched: () => void }) {
               Cancel
             </Button>
             <Button onClick={() => finishBuildConsent(true)}>Continue</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={envDialogSpace !== null}
+        onOpenChange={(open) => {
+          if (!open) closeEnvDialog();
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Secrets for {envDialogSpace?.title ?? envDialogSpace?.name}</DialogTitle>
+            <DialogDescription>
+              This Space reads these values from its environment; supply them to run it.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="flex flex-col gap-2">
+            {envDialogSpace?.secrets.map((name) => (
+              <div key={name} className="flex flex-col gap-1">
+                <label className="text-xs font-medium text-muted-foreground" htmlFor={`secret-${name}`}>
+                  {name}
+                </label>
+                <Input
+                  id={`secret-${name}`}
+                  type="password"
+                  value={envValues[name] ?? ""}
+                  onChange={(e) => setEnvValues((prev) => ({ ...prev, [name]: e.target.value }))}
+                />
+              </div>
+            ))}
+          </div>
+
+          <DialogFooter>
+            <Button variant="outline" onClick={closeEnvDialog}>
+              Cancel
+            </Button>
+            <Button onClick={confirmEnvLaunch}>
+              {envDialogKind === "build" ? "Build locally" : "Run"}
+            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
