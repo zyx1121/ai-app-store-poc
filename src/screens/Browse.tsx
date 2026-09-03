@@ -167,7 +167,11 @@ export function Browse({ onLaunched }: { onLaunched: () => void }) {
     setLaunchError(null);
     setLaunchingId(space.id);
     try {
-      if (spaceWantsGpu(space) && !(await gate({ kind: "space", id: space.id }))) return;
+      if (
+        spaceWantsGpu(space) &&
+        !(await gate({ kind: "space", id: space.id }, space.title ?? space.name))
+      )
+        return;
       await launchSpace(space.id);
       onLaunched();
     } catch (e) {
@@ -181,7 +185,11 @@ export function Browse({ onLaunched }: { onLaunched: () => void }) {
     setLaunchError(null);
     setBuildingId(space.id);
     try {
-      if (spaceWantsGpu(space) && !(await gate({ kind: "space", id: space.id }))) return;
+      if (
+        spaceWantsGpu(space) &&
+        !(await gate({ kind: "space", id: space.id }, space.title ?? space.name))
+      )
+        return;
       await buildSpace(space.id);
       onLaunched();
     } catch (e) {
@@ -197,7 +205,10 @@ export function Browse({ onLaunched }: { onLaunched: () => void }) {
     setLaunchError(null);
     try {
       const tag = `hf.co/${dialogModel.id}:${selectedFile.quant}`;
-      if (!(await gate({ kind: "model", tag, size_bytes: selectedFile.size_bytes }))) return;
+      if (
+        !(await gate({ kind: "model", tag, size_bytes: selectedFile.size_bytes }, dialogModel.name))
+      )
+        return;
       await launchModel(dialogModel.id, selectedFile.quant);
       setDialogModel(null);
       onLaunched();

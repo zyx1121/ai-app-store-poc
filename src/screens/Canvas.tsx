@@ -216,7 +216,7 @@ export function Canvas() {
     try {
       // Image generation needs the card to itself next to a chat LLM on 10 GB;
       // ask what must be unloaded first (issue #10).
-      if (!(await gate({ kind: "service", id: SERVICE_ID }))) return;
+      if (!(await gate({ kind: "service", id: SERVICE_ID }, "ComfyUI"))) return;
       const s = await startService(SERVICE_ID);
       setStatus(s);
     } catch (err) {
