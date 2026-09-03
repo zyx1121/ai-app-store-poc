@@ -3,6 +3,8 @@
 //! local GPU is not NVIDIA, we clone the Space and build it here. Inside WSL2
 //! only NVIDIA GPUs are visible, so every non-NVIDIA build targets the CPU.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use crate::error::{Error, Result};
 use crate::hardware::Vendor;
 use crate::hf::SpaceSummary;
@@ -10,6 +12,17 @@ use crate::wsl;
 
 /// Directory inside the distro where Space sources are cloned.
 pub const BUILD_ROOT: &str = "/var/lib/aias/build";
+
+/// Whether the next build may use a Space repo's own Dockerfile verbatim
+/// instead of the generated one. A repo's Dockerfile runs arbitrary `RUN`
+/// steps with network access on this machine, so it needs the user's consent
+/// (Browse.tsx shows a one-time dialog before the first "Build locally").
+///
+/// This is a flag rather than a `build_space` argument because
+/// `instances::build_space` already calls this function with a fixed
+/// signature; the `build_space` Tauri command sets it just before starting a
+/// build, so it always reflects the choice for the build about to run.
+pub static USE_REPO_DOCKERFILE: AtomicBool = AtomicBool::new(false);
 
 /// Packages that only ship CUDA builds; a non-NVIDIA build with these will fail,
 /// so say so before spending fifteen minutes on it.
@@ -242,7 +255,12 @@ pub async fn build_space(
         }
     }
 
-    if !has_dockerfile {
+    // The repo's own Dockerfile runs arbitrary `RUN` steps with network access on
+    // this machine; only use it verbatim when the user consented (Browse.tsx's
+    // one-time dialog, threaded through `USE_REPO_DOCKERFILE`). Otherwise prefer
+    // the generated Dockerfile even when the Space ships its own.
+    let use_repo_dockerfile = has_dockerfile && USE_REPO_DOCKERFILE.load(Ordering::Relaxed);
+    if !use_repo_dockerfile {
         let exclude_newer = match (space.sdk.as_deref(), space.sdk_version.as_deref()) {
             (Some(sdk), Some(ver)) => sdk_exclude_newer(http, sdk, ver).await,
             _ => None,
@@ -258,6 +276,14 @@ pub async fn build_space(
             python_version.as_deref(),
             exclude_newer.as_deref(),
         ) else {
+            if has_dockerfile {
+                return Err(Error::Other(
+                    "this Space has no supported SDK card, only its own Dockerfile; \
+                     building it needs consent to run the repo's Dockerfile, which \
+                     \"Build locally\" asks for once"
+                        .into(),
+                ));
+            }
             return Err(Error::Other(format!(
                 "SDK `{}` has no Dockerfile and no template; cannot build",
                 space.sdk.as_deref().unwrap_or("unknown")
@@ -278,7 +304,7 @@ pub async fn build_space(
         .await?;
         wsl::stream_lines(write, |_| {}).await?;
     } else {
-        on_line("using the Space's own Dockerfile".into());
+        on_line("using the Space's own Dockerfile (consent given)".into());
     }
 
     on_line(format!("docker build -t {image}"));
