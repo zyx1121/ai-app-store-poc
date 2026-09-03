@@ -43,8 +43,12 @@ fi
 mkdir -p /etc/systemd/system/ollama.service.d
 cat > /etc/systemd/system/ollama.service.d/override.conf <<'EOF'
 [Service]
-Environment=OLLAMA_HOST=0.0.0.0
-Environment=OLLAMA_ORIGINS=*
+# Loopback only: the app reaches it through WSL's localhost relay, and a
+# container must not be able to hit it via the docker gateway. Origins are the
+# Tauri webview (+ vite dev), never *, so a web page in the user's browser
+# cannot drive Ollama.
+Environment=OLLAMA_HOST=127.0.0.1
+Environment=OLLAMA_ORIGINS=http://tauri.localhost,https://tauri.localhost,tauri://localhost,http://localhost:1420
 Environment=OLLAMA_CONTEXT_LENGTH=16384
 Environment=OLLAMA_FLASH_ATTENTION=1
 Environment=OLLAMA_KV_CACHE_TYPE=q8_0
