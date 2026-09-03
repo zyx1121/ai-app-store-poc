@@ -367,8 +367,12 @@ export function Canvas() {
     return workflow;
   }
 
+  // Same cap style as services.rs::wait_healthy / instances.rs::wait_for_http:
+  // 600 ticks at 1 s each bounds a lost prompt to 10 minutes instead of forever.
+  const POLL_HISTORY_MAX_ATTEMPTS = 600;
+
   async function pollHistory(promptId: string): Promise<ComfyHistoryEntry> {
-    for (;;) {
+    for (let attempt = 0; attempt < POLL_HISTORY_MAX_ATTEMPTS; attempt++) {
       if (cancelledRef.current) throw new Error("Cancelled.");
       await new Promise((resolve) => setTimeout(resolve, 1000));
       const res = await fetch(`${COMFYUI_BASE_URL}/history/${promptId}`);
@@ -381,6 +385,7 @@ export function Canvas() {
       }
       if (entry.status.completed) return entry;
     }
+    throw new Error("ComfyUI did not finish the job.");
   }
 
   async function handleGenerate() {
