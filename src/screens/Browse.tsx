@@ -167,7 +167,11 @@ export function Browse({ onLaunched }: { onLaunched: () => void }) {
     setLaunchError(null);
     setLaunchingId(space.id);
     try {
-      if (spaceWantsGpu(space) && !(await gate({ kind: "space", id: space.id }))) return;
+      if (
+        spaceWantsGpu(space) &&
+        !(await gate({ kind: "space", id: space.id }, space.title ?? space.name))
+      )
+        return;
       await launchSpace(space.id);
       onLaunched();
     } catch (e) {
@@ -181,7 +185,11 @@ export function Browse({ onLaunched }: { onLaunched: () => void }) {
     setLaunchError(null);
     setBuildingId(space.id);
     try {
-      if (spaceWantsGpu(space) && !(await gate({ kind: "space", id: space.id }))) return;
+      if (
+        spaceWantsGpu(space) &&
+        !(await gate({ kind: "space", id: space.id }, space.title ?? space.name))
+      )
+        return;
       await buildSpace(space.id);
       onLaunched();
     } catch (e) {
@@ -197,7 +205,10 @@ export function Browse({ onLaunched }: { onLaunched: () => void }) {
     setLaunchError(null);
     try {
       const tag = `hf.co/${dialogModel.id}:${selectedFile.quant}`;
-      if (!(await gate({ kind: "model", tag, size_bytes: selectedFile.size_bytes }))) return;
+      if (
+        !(await gate({ kind: "model", tag, size_bytes: selectedFile.size_bytes }, dialogModel.name))
+      )
+        return;
       await launchModel(dialogModel.id, selectedFile.quant);
       setDialogModel(null);
       onLaunched();
@@ -248,14 +259,19 @@ export function Browse({ onLaunched }: { onLaunched: () => void }) {
               {spaces.map((space) => (
                 <Card key={space.id}>
                   <CardHeader>
-                    <CardTitle className="flex items-center gap-2">
+                    <CardTitle className="flex min-w-0 items-center gap-2">
                       <span className="text-lg leading-none">{space.emoji ?? "🤗"}</span>
-                      <span className="truncate">{space.title ?? space.name}</span>
+                      <span className="min-w-0 truncate" title={space.title ?? space.name}>
+                        {space.title ?? space.name}
+                      </span>
                     </CardTitle>
-                    <CardDescription className="truncate">
+                    <CardDescription
+                      className="min-w-0 truncate"
+                      title={`${space.author}/${space.name}`}
+                    >
                       {space.author}/{space.name}
                     </CardDescription>
-                    <CardAction>
+                    <CardAction className="shrink-0">
                       <CompatBadge compat={space.compat} reason={space.compat_reason} />
                     </CardAction>
                   </CardHeader>
@@ -318,9 +334,13 @@ export function Browse({ onLaunched }: { onLaunched: () => void }) {
               {models.map((model) => (
                 <Card key={model.id}>
                   <CardHeader>
-                    <CardTitle className="truncate">{model.name}</CardTitle>
-                    <CardDescription className="truncate">{model.author}</CardDescription>
-                    <CardAction>
+                    <CardTitle className="min-w-0 truncate" title={model.name}>
+                      {model.name}
+                    </CardTitle>
+                    <CardDescription className="min-w-0 truncate" title={model.author}>
+                      {model.author}
+                    </CardDescription>
+                    <CardAction className="shrink-0">
                       <CompatBadge compat={model.compat} reason={model.compat_reason} />
                     </CardAction>
                   </CardHeader>

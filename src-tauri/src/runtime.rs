@@ -75,6 +75,16 @@ fn emit(app: &AppHandle, step: &str, status: &'static str, message: impl Into<St
     let _ = app.emit(PROGRESS_EVENT, ev);
 }
 
+/// Emit an `error` progress event before an early exit that would otherwise be
+/// silent: a failed spawn or a broken read has no business-logic message of its
+/// own, so the UI would just see the button flip back with an empty log.
+fn emit_err<T>(app: &AppHandle, step: &str, result: Result<T>) -> Result<T> {
+    if let Err(e) = &result {
+        emit(app, step, "error", e.to_string());
+    }
+    result
+}
+
 /// Probe everything. Never fails: a missing piece is a `false`, not an error.
 pub async fn status() -> RuntimeStatus {
     let mut s = RuntimeStatus {
@@ -224,17 +234,21 @@ pub async fn provision(app: &AppHandle, state: &AppState) -> Result<RuntimeStatu
             "Microsoft-Windows-Subsystem-Linux",
             "VirtualMachinePlatform",
         ] {
-            let out = wsl::run(
-                "dism.exe",
-                &[
-                    "/online",
-                    "/enable-feature",
-                    &format!("/featurename:{feature}"),
-                    "/all",
-                    "/norestart",
-                ],
-            )
-            .await?;
+            let out = emit_err(
+                app,
+                "wsl",
+                wsl::run(
+                    "dism.exe",
+                    &[
+                        "/online",
+                        "/enable-feature",
+                        &format!("/featurename:{feature}"),
+                        "/all",
+                        "/norestart",
+                    ],
+                )
+                .await,
+            )?;
             emit(
                 app,
                 "wsl",
@@ -272,8 +286,16 @@ pub async fn provision(app: &AppHandle, state: &AppState) -> Result<RuntimeStatu
         // Features are on; install the modern WSL app. `--web-download` takes it from
         // GitHub instead of the Store, so it works on machines without the Store.
         emit(app, "wsl", "start", "Installing the WSL app");
-        let child = wsl::spawn_win("wsl.exe", &["--update", "--web-download"])?;
-        let code = wsl::stream_lines(child, |l| emit(app, "wsl", "log", l)).await?;
+        let child = emit_err(
+            app,
+            "wsl",
+            wsl::spawn_win("wsl.exe", &["--update", "--web-download"]),
+        )?;
+        let code = emit_err(
+            app,
+            "wsl",
+            wsl::stream_lines(child, |l| emit(app, "wsl", "log", l)).await,
+        )?;
         if code != 0 {
             emit(
                 app,
@@ -306,18 +328,26 @@ pub async fn provision(app: &AppHandle, state: &AppState) -> Result<RuntimeStatu
             "start",
             format!("Installing Ubuntu 24.04 as `{DISTRO}`"),
         );
-        let child = wsl::spawn_win(
-            "wsl.exe",
-            &[
-                "--install",
-                "-d",
-                "Ubuntu-24.04",
-                "--name",
-                DISTRO,
-                "--no-launch",
-            ],
+        let child = emit_err(
+            app,
+            "distro",
+            wsl::spawn_win(
+                "wsl.exe",
+                &[
+                    "--install",
+                    "-d",
+                    "Ubuntu-24.04",
+                    "--name",
+                    DISTRO,
+                    "--no-launch",
+                ],
+            ),
         )?;
-        let code = wsl::stream_lines(child, |l| emit(app, "distro", "log", l)).await?;
+        let code = emit_err(
+            app,
+            "distro",
+            wsl::stream_lines(child, |l| emit(app, "distro", "log", l)).await,
+        )?;
         let present = wsl::wsl(&["-l", "-q"])
             .await
             .map(|o| o.stdout.lines().any(|l| l.trim() == DISTRO))
@@ -352,8 +382,12 @@ pub async fn provision(app: &AppHandle, state: &AppState) -> Result<RuntimeStatu
         },
         PROVISION_SCRIPT.replace("\r\n", "\n")
     );
-    let child = wsl::spawn_script(&script).await?;
-    let code = wsl::stream_lines(child, |l| emit(app, "provision", "log", l)).await?;
+    let child = emit_err(app, "provision", wsl::spawn_script(&script).await)?;
+    let code = emit_err(
+        app,
+        "provision",
+        wsl::stream_lines(child, |l| emit(app, "provision", "log", l)).await,
+    )?;
     if code != 0 {
         emit(
             app,
@@ -379,19 +413,23 @@ pub async fn provision(app: &AppHandle, state: &AppState) -> Result<RuntimeStatu
     let _ = wsl::wsl(&["--terminate", DISTRO]).await;
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     state.ensure_keepalive();
-    let boot = if s.vendor == Vendor::Nvidia {
-        wsl::sh(
-            "systemctl is-system-running --wait >/dev/null 2>&1; systemctl enable --now docker ollama >/dev/null 2>&1; \
-             for i in $(seq 1 30); do curl -sf -m 2 http://127.0.0.1:11434/api/version >/dev/null && break; sleep 1; done; \
-             systemctl is-active docker ollama",
-        )
-        .await?
-    } else {
-        wsl::sh(
-            "systemctl is-system-running --wait >/dev/null 2>&1; systemctl enable --now docker >/dev/null 2>&1; systemctl is-active docker",
-        )
-        .await?
-    };
+    let boot = emit_err(
+        app,
+        "restart",
+        if s.vendor == Vendor::Nvidia {
+            wsl::sh(
+                "systemctl is-system-running --wait >/dev/null 2>&1; systemctl enable --now docker ollama >/dev/null 2>&1; \
+                 for i in $(seq 1 30); do curl -sf -m 2 http://127.0.0.1:11434/api/version >/dev/null && break; sleep 1; done; \
+                 systemctl is-active docker ollama",
+            )
+            .await
+        } else {
+            wsl::sh(
+                "systemctl is-system-running --wait >/dev/null 2>&1; systemctl enable --now docker >/dev/null 2>&1; systemctl is-active docker",
+            )
+            .await
+        },
+    )?;
     emit(app, "restart", "log", boot.stdout.trim().to_string());
     emit(app, "restart", "ok", "services up");
 

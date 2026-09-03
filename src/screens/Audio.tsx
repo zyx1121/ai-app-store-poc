@@ -379,15 +379,19 @@ export function Audio() {
 
   async function startRecording() {
     setRecordError(null);
+    // Held outside the try so the catch can stop it if the constructor below
+    // throws after getUserMedia already acquired the mic; otherwise the track
+    // (and the OS mic-in-use indicator) stays on until a later recording succeeds.
+    let stream: MediaStream | undefined;
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       const recorder = new MediaRecorder(stream, { mimeType: "audio/webm" });
       chunksRef.current = [];
       recorder.ondataavailable = (e) => {
         if (e.data.size > 0) chunksRef.current.push(e.data);
       };
       recorder.onstop = () => {
-        stream.getTracks().forEach((t) => t.stop());
+        stream?.getTracks().forEach((t) => t.stop());
         void handleRecordingStopped();
       };
       mediaRecorderRef.current = recorder;
@@ -398,6 +402,7 @@ export function Audio() {
         setRecordingSeconds((s) => s + 1);
       }, 1000);
     } catch (err) {
+      stream?.getTracks().forEach((t) => t.stop());
       setRecordError(err instanceof Error ? err.message : String(err));
     }
   }

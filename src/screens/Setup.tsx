@@ -342,6 +342,7 @@ export function Setup({
 }) {
   const [provisioning, setProvisioning] = useState(false);
   const [events, setEvents] = useState<ProvisionEvent[]>([]);
+  const [installError, setInstallError] = useState<string | null>(null);
   const [rechecking, setRechecking] = useState(false);
   const logRef = useRef<HTMLDivElement>(null);
 
@@ -367,9 +368,12 @@ export function Setup({
   async function install() {
     setProvisioning(true);
     setEvents([]);
+    setInstallError(null);
     try {
       const result = await provisionRuntime();
       onStatusChange(result);
+    } catch (e) {
+      setInstallError(e instanceof Error ? e.message : String(e));
     } finally {
       setProvisioning(false);
     }
@@ -431,9 +435,17 @@ export function Setup({
         </Alert>
       )}
 
+      {installError && (
+        <Alert variant="destructive">
+          <TriangleAlert className="size-4" />
+          <AlertTitle>Could not install the runtime</AlertTitle>
+          <AlertDescription>{installError}</AlertDescription>
+        </Alert>
+      )}
+
       <div className="flex gap-2">
         <Button onClick={install} disabled={provisioning}>
-          {provisioning ? "Installing..." : "Install runtime"}
+          {provisioning ? "Installing..." : installError ? "Retry" : "Install runtime"}
         </Button>
         <Button variant="outline" onClick={recheck} disabled={rechecking || provisioning}>
           {rechecking ? "Checking..." : "Re-check"}

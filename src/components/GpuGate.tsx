@@ -17,12 +17,20 @@ export function residentLabel(r: Resident): string {
   return r.vram_mb === null ? "size unknown" : gb(r.vram_mb);
 }
 
-type Pending = { plan: GpuPlan; resolve: (proceed: boolean) => void };
+type Pending = { plan: GpuPlan; name: string; resolve: (proceed: boolean) => void };
+
+/** Join residents into "A, B, and C" for a sentence naming who gets stopped. */
+function joinNames(items: string[]): string {
+  if (items.length <= 1) return items[0] ?? "";
+  if (items.length === 2) return `${items[0]} and ${items[1]}`;
+  return `${items.slice(0, -1).join(", ")}, and ${items[items.length - 1]}`;
+}
 
 /**
  * Ask the store what a launch would evict from GPU memory; when the answer is
  * "nothing", proceed at once. Otherwise show the list and let the user unload it
  * and continue, or cancel. `gate` resolves to whether the caller should launch.
+ * `name` is the display name of the thing being launched, shown in the dialog.
  */
 export function useGpuGate() {
   const [pending, setPending] = useState<Pending | null>(null);
@@ -30,11 +38,11 @@ export function useGpuGate() {
   const [error, setError] = useState<string | null>(null);
   const pendingRef = useRef<Pending | null>(null);
 
-  const gate = useCallback(async (request: GpuRequest): Promise<boolean> => {
+  const gate = useCallback(async (request: GpuRequest, name: string): Promise<boolean> => {
     const plan = await gpuPlan(request);
     if (plan.evict.length === 0) return true;
     return new Promise<boolean>((resolve) => {
-      const p = { plan, resolve };
+      const p = { plan, name, resolve };
       pendingRef.current = p;
       setError(null);
       setPending(p);
@@ -64,6 +72,18 @@ export function useGpuGate() {
   }
 
   const plan = pending?.plan;
+  const evict = plan?.evict ?? [];
+  // Only call it an "unload" when everything being freed is a model; stopping a
+  // running service or Space reads better as "stop" to a user who did not
+  // install anything.
+  const allModels = evict.length > 0 && evict.every((r) => r.kind === "model");
+  const verb = allModels ? "Unload" : "Stop";
+  const residentSentence =
+    evict.length > 0
+      ? `${joinNames(
+          evict.map((r) => (r.vram_mb !== null ? `${r.name} (${gb(r.vram_mb)})` : r.name)),
+        )} will be stopped so ${pending?.name} can use the GPU.`
+      : "";
   const dialog: ReactNode = (
     <Dialog
       open={pending !== null}
@@ -73,18 +93,11 @@ export function useGpuGate() {
     >
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>GPU memory is in use</DialogTitle>
-          <DialogDescription>
-            {plan?.need_mb !== null && plan?.need_mb !== undefined
-              ? `This needs about ${gb(plan.need_mb)}`
-              : "This needs the GPU to itself"}
-            {plan?.budget_mb ? ` of ${gb(plan.budget_mb)}` : ""}
-            {plan && plan.resident_mb > 0 ? `; ${gb(plan.resident_mb)} stays loaded` : ""}.
-            The following will be unloaded first:
-          </DialogDescription>
+          <DialogTitle>Free GPU memory for {pending?.name}?</DialogTitle>
+          <DialogDescription>{residentSentence}</DialogDescription>
         </DialogHeader>
         <ul className="flex flex-col gap-1.5 text-sm">
-          {plan?.evict.map((r) => (
+          {evict.map((r) => (
             <li key={`${r.kind}-${r.id}`} className="flex items-center gap-2">
               <Badge variant="outline">{r.kind}</Badge>
               <span className="min-w-0 flex-1 truncate">{r.name}</span>
@@ -98,7 +111,7 @@ export function useGpuGate() {
             Cancel
           </Button>
           <Button disabled={releasing} onClick={handleUnload}>
-            {releasing ? "Unloading..." : "Unload and continue"}
+            {releasing ? `${verb === "Unload" ? "Unloading" : "Stopping"}...` : `${verb} and continue`}
           </Button>
         </DialogFooter>
       </DialogContent>

@@ -21,7 +21,15 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": {
+        "default-src": "'self'",
+        "script-src": "'self'",
+        "style-src": "'self' 'unsafe-inline'",
+        "img-src": "'self' blob: data: http://localhost:* https://*.huggingface.co",
+        "media-src": "blob: http://localhost:*",
+        "worker-src": "blob:",
+        "connect-src": "ipc: http://ipc.localhost http://localhost:* http://127.0.0.1:* http://[::1]:* ws://localhost:* https://huggingface.co https://*.huggingface.co https://cdn-lfs.huggingface.co"
+      }
     }
   },
   "bundle": {
