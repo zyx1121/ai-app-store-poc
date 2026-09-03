@@ -21,6 +21,9 @@ pub struct AppState {
     pub native_ollama: Mutex<Option<Child>>,
     /// Platform services running as native Windows processes (whisper.cpp, portable ComfyUI).
     pub native_services: Mutex<HashMap<ServiceId, Child>>,
+    /// Per-container `--memory` cap for Space containers (75% of the WSL2 VM's
+    /// own cap), computed once from `total_ram_mb` at startup (#64).
+    pub container_memory_cap_mb: Mutex<Option<u64>>,
 }
 
 impl Default for AppState {
@@ -39,6 +42,7 @@ impl Default for AppState {
             services: Mutex::new(HashMap::new()),
             native_ollama: Mutex::new(None),
             native_services: Mutex::new(HashMap::new()),
+            container_memory_cap_mb: Mutex::new(None),
         }
     }
 }
@@ -77,6 +81,12 @@ impl AppState {
             .lock()
             .ok()
             .and_then(|r| r.as_ref().and_then(|s| s.effective_memory_mb))
+    }
+
+    /// `--memory` cap Space containers run under, if the startup probe could
+    /// size it (#64). `None` on a fresh state before the first `runtime::refresh`.
+    pub fn container_memory_cap_mb(&self) -> Option<u64> {
+        self.container_memory_cap_mb.lock().ok().and_then(|g| *g)
     }
 
     pub fn is_ready(&self) -> bool {
