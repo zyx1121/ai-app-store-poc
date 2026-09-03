@@ -328,7 +328,11 @@ async fn wait_for_http(app: &AppHandle, id: &str, port: u16, cname: &str) -> Res
         .build()?;
     let url = format!("http://localhost:{port}/");
     let mut last_status: Option<u16> = None;
-    for tick in 0..150u32 {
+    // A Space may download its weights before it binds the port (MusicGen
+    // preloads 2.8 GB, #51). Keep waiting while the container is alive: the
+    // log tail shows progress and Stop is always available. 60 min is only a
+    // safety net.
+    for tick in 0..1800u32 {
         tokio::time::sleep(Duration::from_secs(2)).await;
         // Only a page that actually renders counts; a 500 from a half-started
         // or broken app must not be reported as Running.
