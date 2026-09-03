@@ -62,7 +62,14 @@ async fn launch_space(app: AppHandle, id: String) -> CmdResult<instances::Instan
 }
 
 #[tauri::command]
-async fn build_space(app: AppHandle, id: String) -> CmdResult<instances::Instance> {
+async fn build_space(
+    app: AppHandle,
+    id: String,
+    use_repo_dockerfile: bool,
+) -> CmdResult<instances::Instance> {
+    // Set before starting the build; `build::build_space` (called deep inside
+    // `instances::build_space`) reads it instead of taking it as an argument.
+    build::USE_REPO_DOCKERFILE.store(use_repo_dockerfile, std::sync::atomic::Ordering::Relaxed);
     cmd(instances::build_space(app, id).await)
 }
 

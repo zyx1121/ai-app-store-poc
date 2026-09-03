@@ -1,4 +1,4 @@
-import { useEffect, useState, type KeyboardEvent } from "react";
+import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import {
   buildSpace,
   launchModel,
@@ -40,6 +40,27 @@ import { formatBytes, formatCount } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
 type LoadState = "loading" | "idle" | "error";
+
+const BUILD_DONT_ASK_KEY = "buildLocally.dontAskAgain";
+const BUILD_USE_REPO_DOCKERFILE_KEY = "buildLocally.useRepoDockerfile";
+
+function loadBoolPreference(key: string): boolean {
+  try {
+    return localStorage.getItem(key) === "true";
+  } catch {
+    return false;
+  }
+}
+
+function saveBoolPreference(key: string, value: boolean) {
+  try {
+    localStorage.setItem(key, String(value));
+  } catch {
+    // ignore (private browsing, storage disabled, ...)
+  }
+}
+
+type BuildConsent = { proceed: boolean; useRepoDockerfile: boolean };
 
 function CardGridSkeleton() {
   return (
@@ -90,6 +111,11 @@ export function Browse({ onLaunched }: { onLaunched: () => void }) {
   const [selectedFile, setSelectedFile] = useState<GgufFile | null>(null);
   const [launching, setLaunching] = useState(false);
   const { gate, dialog: gpuDialog } = useGpuGate();
+
+  const [buildConsentSpace, setBuildConsentSpace] = useState<SpaceSummary | null>(null);
+  const [consentUseRepoDockerfile, setConsentUseRepoDockerfile] = useState(false);
+  const [consentDontAskAgain, setConsentDontAskAgain] = useState(false);
+  const buildConsentResolve = useRef<((choice: BuildConsent) => void) | null>(null);
 
   useEffect(() => {
     const t = setTimeout(() => setDebouncedQuery(query), 400);
@@ -181,6 +207,37 @@ export function Browse({ onLaunched }: { onLaunched: () => void }) {
     }
   }
 
+  /**
+   * Build locally runs code from the Space's own repository (cloned Dockerfile
+   * or generated one, either way `RUN` steps execute here with network access).
+   * Ask once; after "Don't ask again" reuse the stored choice silently.
+   */
+  function confirmBuildLocally(space: SpaceSummary): Promise<BuildConsent> {
+    if (loadBoolPreference(BUILD_DONT_ASK_KEY)) {
+      return Promise.resolve({
+        proceed: true,
+        useRepoDockerfile: loadBoolPreference(BUILD_USE_REPO_DOCKERFILE_KEY),
+      });
+    }
+    return new Promise<BuildConsent>((resolve) => {
+      buildConsentResolve.current = resolve;
+      setConsentUseRepoDockerfile(false);
+      setConsentDontAskAgain(false);
+      setBuildConsentSpace(space);
+    });
+  }
+
+  function finishBuildConsent(proceed: boolean) {
+    const resolve = buildConsentResolve.current;
+    buildConsentResolve.current = null;
+    setBuildConsentSpace(null);
+    if (proceed && consentDontAskAgain) {
+      saveBoolPreference(BUILD_DONT_ASK_KEY, true);
+      saveBoolPreference(BUILD_USE_REPO_DOCKERFILE_KEY, consentUseRepoDockerfile);
+    }
+    resolve?.({ proceed, useRepoDockerfile: consentUseRepoDockerfile });
+  }
+
   async function runBuildSpace(space: SpaceSummary) {
     setLaunchError(null);
     setBuildingId(space.id);
@@ -190,7 +247,9 @@ export function Browse({ onLaunched }: { onLaunched: () => void }) {
         !(await gate({ kind: "space", id: space.id }, space.title ?? space.name))
       )
         return;
-      await buildSpace(space.id);
+      const { proceed, useRepoDockerfile } = await confirmBuildLocally(space);
+      if (!proceed) return;
+      await buildSpace(space.id, useRepoDockerfile);
       onLaunched();
     } catch (e) {
       setLaunchError(String(e));
@@ -429,6 +488,46 @@ export function Browse({ onLaunched }: { onLaunched: () => void }) {
             >
               {launching ? "Launching..." : "Run"}
             </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={buildConsentSpace !== null}
+        onOpenChange={(open) => {
+          if (!open) finishBuildConsent(false);
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Build locally?</DialogTitle>
+            <DialogDescription>
+              Build locally runs code from this Space's repository on your PC. Continue?
+            </DialogDescription>
+          </DialogHeader>
+          <label className="flex items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              className="size-4 rounded border-input"
+              checked={consentUseRepoDockerfile}
+              onChange={(e) => setConsentUseRepoDockerfile(e.target.checked)}
+            />
+            Use the Space's own Dockerfile (runs its `RUN` steps verbatim)
+          </label>
+          <label className="flex items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              className="size-4 rounded border-input"
+              checked={consentDontAskAgain}
+              onChange={(e) => setConsentDontAskAgain(e.target.checked)}
+            />
+            Don't ask again
+          </label>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => finishBuildConsent(false)}>
+              Cancel
+            </Button>
+            <Button onClick={() => finishBuildConsent(true)}>Continue</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

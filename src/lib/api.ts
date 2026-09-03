@@ -194,8 +194,13 @@ export const launchSpace = (id: string) => invoke<Instance>("launch_space", { id
  * Clone the Space and build its image here, then run it. For GPUs the Hub never
  * built for (AMD, Intel, CPU) and for Spaces without an image. Non-NVIDIA builds
  * target the CPU; Spaces needing CUDA-only packages are refused with the reason.
+ *
+ * `useRepoDockerfile` opts into running the Space repo's own Dockerfile verbatim
+ * (network access, arbitrary `RUN` steps) instead of the generated one; Browse.tsx
+ * gates it behind a one-time consent dialog and defaults it off.
  */
-export const buildSpace = (id: string) => invoke<Instance>("build_space", { id });
+export const buildSpace = (id: string, useRepoDockerfile: boolean) =>
+  invoke<Instance>("build_space", { id, useRepoDockerfile });
 
 /**
  * `repo` is a Hugging Face GGUF repo (`owner/name`) with `quant` the file's quant tag,
