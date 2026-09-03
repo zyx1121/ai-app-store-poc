@@ -90,8 +90,13 @@ enum Runtime {
     },
     /// A Windows process unpacked into `%LOCALAPPDATA%\ai-app-store\services\<id>\`.
     Native {
-        /// archives to download and unpack into the install dir, in order
-        downloads: &'static [(&'static str, &'static str)],
+        /// archives to download and unpack into the install dir, in order: (url,
+        /// archive file name, expected SHA-256). `None` means no compile-time
+        /// digest is embedded; `run_native` then falls back to the `SHA256SUMS`
+        /// file this repository's own `runtimes` release publishes beside its
+        /// assets (see `fetch::release_checksum`), and fails the download if
+        /// even that yields nothing.
+        downloads: &'static [(&'static str, &'static str, Option<&'static str>)],
         /// program to run, relative to the install dir
         exe: &'static str,
         args: &'static [&'static str],
@@ -236,9 +241,13 @@ const COMFYUI_ROCM: ServiceSpec = ServiceSpec {
     backend: "rocm",
     models: COMFYUI_PORTABLE_MODELS,
     runtime: Runtime::Native {
+        // Pinned to v0.34.0 (Comfy-Org/ComfyUI, published 2026-08-26); upstream
+        // publishes no checksum file, so the digest below is `shasum -a 256` on
+        // the file downloaded here on 2026-09-03 (1,817,392,344 bytes).
         downloads: &[(
-            "https://github.com/comfyanonymous/ComfyUI/releases/latest/download/ComfyUI_windows_portable_amd.7z",
+            "https://github.com/comfyanonymous/ComfyUI/releases/download/v0.34.0/ComfyUI_windows_portable_amd.7z",
             "ComfyUI_windows_portable_amd.7z",
+            Some("da9317b62eab26865563b0529012799fd1f63e604d4ce81432c4e98eb6008b3f"),
         )],
         exe: "ComfyUI_windows_portable\\python_embeded\\python.exe",
         args: COMFYUI_PORTABLE_ARGS,
@@ -253,9 +262,13 @@ const COMFYUI_XPU: ServiceSpec = ServiceSpec {
     backend: "xpu",
     models: COMFYUI_PORTABLE_MODELS,
     runtime: Runtime::Native {
+        // Pinned to v0.34.0, same release as the ROCm build above; digest is
+        // `shasum -a 256` on the file downloaded here on 2026-09-03
+        // (1,734,410,473 bytes), upstream publishes no checksum file.
         downloads: &[(
-            "https://github.com/comfyanonymous/ComfyUI/releases/latest/download/ComfyUI_windows_portable_intel.7z",
+            "https://github.com/comfyanonymous/ComfyUI/releases/download/v0.34.0/ComfyUI_windows_portable_intel.7z",
             "ComfyUI_windows_portable_intel.7z",
+            Some("7dd41db69b53b4db120ce617d310c785e9fe9c0c9d634a3ea57cd877cab89e9e"),
         )],
         exe: "ComfyUI_windows_portable\\python_embeded\\python.exe",
         args: COMFYUI_PORTABLE_ARGS,
@@ -319,9 +332,14 @@ const CV_OVMS: ServiceSpec = ServiceSpec {
 const CV_OVMS_NPU: ServiceSpec = ServiceSpec {
     backend: "openvino-npu",
     runtime: Runtime::Native {
+        // Digest from upstream's own published
+        // `ovms_windows_2026.3.0_python_off.zip.sha256` (release published
+        // 2026-08-04), cross-checked here with `shasum -a 256` on 2026-09-03
+        // (108,901,047 bytes, matched).
         downloads: &[(
             "https://github.com/openvinotoolkit/model_server/releases/download/v2026.3/ovms_windows_2026.3.0_python_off.zip",
             "ovms.zip",
+            Some("29ae9bda6f86544be14673397f1625d0161e9a3a0ff71d80e197b0d32e168fd9"),
         )],
         exe: "ovms\\ovms.exe",
         // Both listeners bind loopback: OVMS defaults to 0.0.0.0, which makes Windows
@@ -369,9 +387,16 @@ const WHISPER_VULKAN: ServiceSpec = ServiceSpec {
         "models\\ggml-small-q5_1.bin",
     )],
     runtime: Runtime::Native {
+        // This repository builds and publishes the asset itself (no upstream
+        // Vulkan Windows build exists), so there is no third-party digest to
+        // pin here; `runtimes.yml` now cuts a versioned `runtimes-vN` release
+        // (never overwritten) and uploads a `SHA256SUMS` beside the zip, which
+        // `run_native` fetches and checks against instead (`sha256: None`
+        // means "verify against the release's own SHA256SUMS", not "skip").
         downloads: &[(
-            "https://github.com/zyx1121/ai-app-store-poc/releases/download/runtimes/whisper-server-vulkan-x64.zip",
+            "https://github.com/zyx1121/ai-app-store-poc/releases/download/runtimes-v1/whisper-server-vulkan-x64.zip",
             "whisper-server-vulkan-x64.zip",
+            None,
         )],
         exe: "whisper-server.exe",
         args: &[
@@ -796,7 +821,9 @@ pub async fn install_model(app: AppHandle, id: ServiceId, name: String) -> Resul
             let dest = native_dir(id)?.join(&path);
             let http = state.http.clone();
             let app2 = app.clone();
-            fetch::download(&http, &url, &dest, &mut |l| push_log(&app2, id, l)).await?;
+            // Model files (safetensors, GGUF) come from the Hub, not this store's
+            // pinned native runtimes; #37 only covers the latter, so no digest.
+            fetch::download(&http, &url, &dest, None, &mut |l| push_log(&app2, id, l)).await?;
             // A native CV server (OVMS) reads its model list from ovms.json; refresh it
             // so a running server picks the new detector up on its file poll.
             if id == ServiceId::Cv {
@@ -1176,10 +1203,28 @@ async fn run_native(app: &AppHandle, s: &ServiceSpec) -> Result<()> {
     let exe_path = dir.join(exe);
     if !exe_path.exists() {
         tokio::fs::create_dir_all(&dir).await?;
-        for (url, archive) in downloads {
+        for (url, archive, sha256) in downloads {
             let dest = dir.join(archive);
             push_log(app, id, format!("downloading {url}"));
-            fetch::download(&state.http, url, &dest, &mut |l| push_log(app, id, l)).await?;
+            let sha256 = match sha256 {
+                Some(s) => Some((*s).to_string()),
+                None => {
+                    let checked =
+                        fetch::release_checksum(&state.http, url, &mut |l| push_log(app, id, l))
+                            .await;
+                    if checked.is_none() {
+                        return Err(Error::Other(format!(
+                            "no SHA-256 available for {archive} (no compile-time digest, and \
+                             the release published no SHA256SUMS); refusing to download it"
+                        )));
+                    }
+                    checked
+                }
+            };
+            fetch::download(&state.http, url, &dest, sha256.as_deref(), &mut |l| {
+                push_log(app, id, l)
+            })
+            .await?;
             push_log(app, id, format!("unpacking {archive}"));
             fetch::extract(&dest, &dir).await?;
             let _ = tokio::fs::remove_file(&dest).await;
