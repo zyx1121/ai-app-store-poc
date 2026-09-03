@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { ChevronDown } from "lucide-react";
 import {
   listInstances,
   onInstanceUpdate,
@@ -17,16 +18,86 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { StatusBadge } from "@/components/StatusBadge";
 import { LogTail } from "@/components/LogTail";
 import { GpuMemoryCard } from "@/components/GpuMemoryCard";
 
+const LIVE_STATUSES: Instance["status"][] = ["pulling", "building", "starting", "running", "error"];
+
+/**
+ * Merge an update into the list. A relaunch of the same repo starts a fresh
+ * instance with a new id; drop any stopped card for that repo so the old one
+ * does not pile up next to the new run.
+ */
 function upsert(list: Instance[], next: Instance): Instance[] {
-  const idx = list.findIndex((i) => i.id === next.id);
-  if (idx === -1) return [next, ...list];
-  const copy = list.slice();
+  const withoutStaleStopped = list.filter(
+    (i) =>
+      i.id === next.id ||
+      !(i.repo === next.repo && i.kind === next.kind && i.status === "stopped" && next.status !== "stopped"),
+  );
+  const idx = withoutStaleStopped.findIndex((i) => i.id === next.id);
+  if (idx === -1) return [next, ...withoutStaleStopped];
+  const copy = withoutStaleStopped.slice();
   copy[idx] = next;
   return copy;
+}
+
+function InstanceCard({
+  instance,
+  onOpenChat,
+  onStop,
+  onRemove,
+}: {
+  instance: Instance;
+  onOpenChat: (instanceId: string) => void;
+  onStop: (id: string) => void;
+  onRemove: (id: string) => void;
+}) {
+  const canOpen = instance.kind === "space" && instance.status === "running" && instance.url;
+  const canChat = instance.kind === "model" && instance.status === "running";
+  const canStop = instance.status !== "stopped";
+  const canRemove = instance.status === "stopped" || instance.status === "error";
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2">
+          <Badge variant="outline">{instance.kind}</Badge>
+          <span className="truncate">{instance.display_name}</span>
+        </CardTitle>
+        <CardDescription>{instance.repo}</CardDescription>
+      </CardHeader>
+      <CardContent className="flex flex-col gap-2">
+        <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+          <StatusBadge status={instance.status} />
+          {instance.local_build && <Badge variant="outline">Built locally</Badge>}
+          {instance.port && <span>port {instance.port}</span>}
+          {instance.url && <span className="truncate">{instance.url}</span>}
+        </div>
+        {instance.error && <p className="text-xs text-destructive">{instance.error}</p>}
+        <LogTail lines={instance.log_tail} />
+      </CardContent>
+      <CardFooter className="flex gap-2">
+        {canOpen && (
+          <Button variant="outline" onClick={() => openUrl(instance.url!)}>
+            Open
+          </Button>
+        )}
+        {canChat && <Button onClick={() => onOpenChat(instance.id)}>Chat</Button>}
+        {canStop && (
+          <Button variant="outline" onClick={() => onStop(instance.id)}>
+            Stop
+          </Button>
+        )}
+        {canRemove && (
+          <Button variant="destructive" onClick={() => onRemove(instance.id)}>
+            Remove
+          </Button>
+        )}
+      </CardFooter>
+    </Card>
+  );
 }
 
 export function Running({ onOpenChat }: { onOpenChat: (instanceId: string) => void }) {
@@ -61,6 +132,11 @@ export function Running({ onOpenChat }: { onOpenChat: (instanceId: string) => vo
     setInstances((prev) => prev.filter((i) => i.id !== id));
   }
 
+  async function handleRemoveAll(ids: string[]) {
+    await Promise.all(ids.map((id) => removeInstance(id)));
+    setInstances((prev) => prev.filter((i) => !ids.includes(i.id)));
+  }
+
   if (instances.length === 0) {
     return (
       <div className="flex flex-col gap-3 p-6">
@@ -72,55 +148,62 @@ export function Running({ onOpenChat }: { onOpenChat: (instanceId: string) => vo
     );
   }
 
+  const live = instances.filter((i) => LIVE_STATUSES.includes(i.status));
+  const stopped = instances.filter((i) => i.status === "stopped");
+
   return (
     <div className="flex flex-col gap-3 p-6">
       <GpuMemoryCard />
-      {instances.map((instance) => {
-        const canOpen = instance.kind === "space" && instance.status === "running" && instance.url;
-        const canChat = instance.kind === "model" && instance.status === "running";
-        const canStop = instance.status !== "stopped";
-        const canRemove = instance.status === "stopped" || instance.status === "error";
+      {live.length === 0 && (
+        <p className="text-sm text-muted-foreground">
+          No active instances. Launch an app or model from Browse.
+        </p>
+      )}
+      {live.map((instance) => (
+        <InstanceCard
+          key={instance.id}
+          instance={instance}
+          onOpenChat={onOpenChat}
+          onStop={handleStop}
+          onRemove={handleRemove}
+        />
+      ))}
 
-        return (
-          <Card key={instance.id}>
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <Badge variant="outline">{instance.kind}</Badge>
-                <span className="truncate">{instance.display_name}</span>
-              </CardTitle>
-              <CardDescription>{instance.repo}</CardDescription>
-            </CardHeader>
-            <CardContent className="flex flex-col gap-2">
-              <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-                <StatusBadge status={instance.status} />
-                {instance.local_build && <Badge variant="outline">Built locally</Badge>}
-                {instance.port && <span>port {instance.port}</span>}
-                {instance.url && <span className="truncate">{instance.url}</span>}
-              </div>
-              {instance.error && <p className="text-xs text-destructive">{instance.error}</p>}
-              <LogTail lines={instance.log_tail} />
-            </CardContent>
-            <CardFooter className="flex gap-2">
-              {canOpen && (
-                <Button variant="outline" onClick={() => openUrl(instance.url!)}>
-                  Open
-                </Button>
-              )}
-              {canChat && <Button onClick={() => onOpenChat(instance.id)}>Chat</Button>}
-              {canStop && (
-                <Button variant="outline" onClick={() => handleStop(instance.id)}>
-                  Stop
-                </Button>
-              )}
-              {canRemove && (
-                <Button variant="destructive" onClick={() => handleRemove(instance.id)}>
-                  Remove
-                </Button>
-              )}
-            </CardFooter>
-          </Card>
-        );
-      })}
+      {stopped.length > 0 && (
+        <Collapsible className="flex flex-col gap-3 rounded-xl border border-border p-3">
+          <div className="flex items-center gap-2">
+            <CollapsibleTrigger
+              render={
+                <button
+                  type="button"
+                  className="group flex flex-1 items-center gap-2 text-left text-sm font-medium"
+                />
+              }
+            >
+              <ChevronDown className="size-4 shrink-0 transition-transform group-data-[panel-open]:rotate-180" />
+              Recent ({stopped.length})
+            </CollapsibleTrigger>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => handleRemoveAll(stopped.map((i) => i.id))}
+            >
+              Remove all
+            </Button>
+          </div>
+          <CollapsibleContent className="flex flex-col gap-3">
+            {stopped.map((instance) => (
+              <InstanceCard
+                key={instance.id}
+                instance={instance}
+                onOpenChat={onOpenChat}
+                onStop={handleStop}
+                onRemove={handleRemove}
+              />
+            ))}
+          </CollapsibleContent>
+        </Collapsible>
+      )}
     </div>
   );
 }
