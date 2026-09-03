@@ -12,7 +12,10 @@ mod runtime;
 mod services;
 mod state;
 mod storage;
+mod token;
 mod wsl;
+
+use std::collections::HashMap;
 
 use tauri::{AppHandle, Manager, State};
 use tauri_plugin_opener::OpenerExt;
@@ -39,7 +42,7 @@ async fn search_spaces(
     query: String,
     limit: Option<usize>,
 ) -> CmdResult<Vec<hf::SpaceSummary>> {
-    cmd(hf::search_spaces(&state.http, &query, limit.unwrap_or(24), state.has_gpu()).await)
+    cmd(hf::search_spaces(state.inner(), &query, limit.unwrap_or(24)).await)
 }
 
 #[tauri::command]
@@ -48,17 +51,21 @@ async fn search_models(
     query: String,
     limit: Option<usize>,
 ) -> CmdResult<Vec<hf::ModelSummary>> {
-    cmd(hf::search_models(&state.http, &query, limit.unwrap_or(24)).await)
+    cmd(hf::search_models(state.inner(), &query, limit.unwrap_or(24)).await)
 }
 
 #[tauri::command]
 async fn model_files(state: State<'_, AppState>, repo: String) -> CmdResult<Vec<hf::GgufFile>> {
-    cmd(hf::model_files(&state.http, &repo, state.memory_budget_mb()).await)
+    cmd(hf::model_files(state.inner(), &repo).await)
 }
 
 #[tauri::command]
-async fn launch_space(app: AppHandle, id: String) -> CmdResult<instances::Instance> {
-    cmd(instances::launch_space(app, id).await)
+async fn launch_space(
+    app: AppHandle,
+    id: String,
+    env: Option<HashMap<String, String>>,
+) -> CmdResult<instances::Instance> {
+    cmd(instances::launch_space(app, id, env.unwrap_or_default()).await)
 }
 
 #[tauri::command]
@@ -66,11 +73,37 @@ async fn build_space(
     app: AppHandle,
     id: String,
     use_repo_dockerfile: bool,
+    env: Option<HashMap<String, String>>,
 ) -> CmdResult<instances::Instance> {
     // Set before starting the build; `build::build_space` (called deep inside
     // `instances::build_space`) reads it instead of taking it as an argument.
     build::USE_REPO_DOCKERFILE.store(use_repo_dockerfile, std::sync::atomic::Ordering::Relaxed);
-    cmd(instances::build_space(app, id).await)
+    cmd(instances::build_space(app, id, env.unwrap_or_default()).await)
+}
+
+/// Optional Hugging Face token (#60): `None` clears it. Never returns the
+/// value back to the frontend, only whether one is set (`hf_token_status`).
+#[tauri::command]
+fn set_hf_token(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    token: Option<String>,
+) -> CmdResult<()> {
+    let token = token
+        .as_deref()
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(str::to_string);
+    token::save(&app, token.as_deref()).map_err(|e| e.to_string())?;
+    if let Ok(mut guard) = state.hf_token.lock() {
+        *guard = token;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn hf_token_status(state: State<'_, AppState>) -> CmdResult<bool> {
+    Ok(state.hf_token().is_some())
 }
 
 #[tauri::command]
@@ -239,6 +272,12 @@ pub fn run() {
             // Warm the runtime status so the first screen is right, and keep
             // the distro alive for the lifetime of the app.
             let handle = app.handle().clone();
+            // Load the HF token (#60), if the user set one on a previous run.
+            let stored_token = token::load(&handle);
+            let state = handle.state::<AppState>();
+            if let Ok(mut guard) = state.hf_token.lock() {
+                *guard = stored_token;
+            }
             tauri::async_runtime::spawn(async move {
                 let state = handle.state::<AppState>();
                 let s = runtime::refresh(&state).await;
@@ -290,6 +329,8 @@ pub fn run() {
             storage_cleanup,
             write_wslconfig,
             open_url,
+            set_hf_token,
+            hf_token_status,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

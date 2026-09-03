@@ -341,6 +341,9 @@ mod tests {
             emoji: None,
             compat: Compat::Ready,
             compat_reason: None,
+            // `secrets` (#57) is a new SpaceSummary field; this fixture never
+            // exercises it, only the local-build flow.
+            secrets: vec![],
         }
     }
 
