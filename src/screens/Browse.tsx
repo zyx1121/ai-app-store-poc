@@ -6,6 +6,7 @@ import {
   modelFiles,
   searchModels,
   searchSpaces,
+  spaceImageSize,
   type GgufFile,
   type ModelSummary,
   type SpaceSummary,
@@ -61,6 +62,31 @@ function saveBoolPreference(key: string, value: boolean) {
 }
 
 type BuildConsent = { proceed: boolean; useRepoDockerfile: boolean };
+
+/**
+ * Lazily fetches a Space's image size for the Browse card badge (#55). One
+ * request per card, cached on the Rust side by image so a re-render or a
+ * second card for the same Space is free; failures (private, gated, static
+ * Spaces with no image) are silent and just render nothing.
+ */
+function SpaceImageSizeBadge({ spaceId }: { spaceId: string }) {
+  const [mb, setMb] = useState<number | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    spaceImageSize(spaceId)
+      .then((size) => {
+        if (!cancelled) setMb(size);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [spaceId]);
+
+  if (mb === null) return null;
+  return <span>{formatBytes(mb * 1024 * 1024)} image</span>;
+}
 
 function CardGridSkeleton() {
   return (
@@ -203,12 +229,13 @@ export function Browse({ onLaunched }: { onLaunched: () => void }) {
     setLaunchError(null);
     setLaunchingId(space.id);
     try {
-      if (
-        spaceWantsGpu(space) &&
-        !(await gate({ kind: "space", id: space.id }, space.title ?? space.name))
-      )
-        return;
-      await launchSpace(space.id, env);
+      let leaseId: string | null = null;
+      if (spaceWantsGpu(space)) {
+        const result = await gate({ kind: "space", id: space.id }, space.title ?? space.name);
+        if (!result.proceed) return;
+        leaseId = result.leaseId;
+      }
+      await launchSpace(space.id, env, leaseId);
       onLaunched();
     } catch (e) {
       setLaunchError(String(e));
@@ -252,14 +279,15 @@ export function Browse({ onLaunched }: { onLaunched: () => void }) {
     setLaunchError(null);
     setBuildingId(space.id);
     try {
-      if (
-        spaceWantsGpu(space) &&
-        !(await gate({ kind: "space", id: space.id }, space.title ?? space.name))
-      )
-        return;
+      let leaseId: string | null = null;
+      if (spaceWantsGpu(space)) {
+        const result = await gate({ kind: "space", id: space.id }, space.title ?? space.name);
+        if (!result.proceed) return;
+        leaseId = result.leaseId;
+      }
       const { proceed, useRepoDockerfile } = await confirmBuildLocally(space);
       if (!proceed) return;
-      await buildSpace(space.id, useRepoDockerfile, env);
+      await buildSpace(space.id, useRepoDockerfile, env, leaseId);
       onLaunched();
     } catch (e) {
       setLaunchError(String(e));
@@ -305,11 +333,12 @@ export function Browse({ onLaunched }: { onLaunched: () => void }) {
     setLaunchError(null);
     try {
       const tag = `hf.co/${dialogModel.id}:${selectedFile.quant}`;
-      if (
-        !(await gate({ kind: "model", tag, size_bytes: selectedFile.size_bytes }, dialogModel.name))
-      )
-        return;
-      await launchModel(dialogModel.id, selectedFile.quant);
+      const result = await gate(
+        { kind: "model", tag, size_bytes: selectedFile.size_bytes },
+        dialogModel.name,
+      );
+      if (!result.proceed) return;
+      await launchModel(dialogModel.id, selectedFile.quant, result.leaseId);
       setDialogModel(null);
       onLaunched();
     } catch (e) {
@@ -384,6 +413,7 @@ export function Browse({ onLaunched }: { onLaunched: () => void }) {
                         Needs secrets: {space.secrets.join(", ")}
                       </span>
                     )}
+                    {space.sdk !== "static" && <SpaceImageSizeBadge spaceId={space.id} />}
                   </CardContent>
                   <CardFooter className="flex gap-2">
                     <Button

@@ -294,11 +294,12 @@ export function Vision({ active = true }: { active?: boolean }) {
     setLaunchError(null);
     try {
       // qwen2.5vl:7b is a 6 GB pull; next to a chat LLM it overflows a 10 GB card.
-      if (
-        !(await gate({ kind: "model", tag: "qwen2.5vl:7b", size_bytes: 6_000_000_000 }, "qwen2.5vl:7b"))
-      )
-        return;
-      const instance = await launchModel("qwen2.5vl", "7b");
+      const result = await gate(
+        { kind: "model", tag: "qwen2.5vl:7b", size_bytes: 6_000_000_000 },
+        "qwen2.5vl:7b",
+      );
+      if (!result.proceed) return;
+      const instance = await launchModel("qwen2.5vl", "7b", result.leaseId);
       setInstances((prev) => upsert(prev, instance));
     } catch (err) {
       setLaunchError(err instanceof Error ? err.message : String(err));

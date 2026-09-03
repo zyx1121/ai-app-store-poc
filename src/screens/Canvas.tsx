@@ -216,8 +216,9 @@ export function Canvas() {
     try {
       // Image generation needs the card to itself next to a chat LLM on 10 GB;
       // ask what must be unloaded first (issue #10).
-      if (!(await gate({ kind: "service", id: SERVICE_ID }, "ComfyUI"))) return;
-      const s = await startService(SERVICE_ID);
+      const result = await gate({ kind: "service", id: SERVICE_ID }, "ComfyUI");
+      if (!result.proceed) return;
+      const s = await startService(SERVICE_ID, result.leaseId);
       setStatus(s);
     } catch (err) {
       setServiceError(err instanceof Error ? err.message : String(err));
@@ -243,7 +244,11 @@ export function Canvas() {
     setServiceError(null);
     try {
       await stopService(SERVICE_ID);
-      const s = await startService(SERVICE_ID);
+      // Stopping just freed ComfyUI's own memory, but the start still needs a
+      // valid lease (#70); re-plan rather than assume nothing else changed.
+      const result = await gate({ kind: "service", id: SERVICE_ID }, "ComfyUI");
+      if (!result.proceed) return;
+      const s = await startService(SERVICE_ID, result.leaseId);
       setStatus(s);
     } catch (err) {
       setServiceError(err instanceof Error ? err.message : String(err));
