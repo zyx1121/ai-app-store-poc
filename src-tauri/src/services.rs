@@ -135,7 +135,7 @@ const SPEACHES: ServiceSpec = ServiceSpec {
         env: &[
             (
                 "ALLOW_ORIGINS",
-                r#"["http://tauri.localhost","https://tauri.localhost","tauri://localhost","http://localhost:1420"]"#,
+                r#"["http://tauri.localhost","https://tauri.localhost","http://localhost:1420"]"#,
             ),
             ("ENABLE_UI", "false"),
         ],
@@ -157,7 +157,7 @@ const SPEACHES_CPU: ServiceSpec = ServiceSpec {
         env: &[
             (
                 "ALLOW_ORIGINS",
-                r#"["http://tauri.localhost","https://tauri.localhost","tauri://localhost","http://localhost:1420"]"#,
+                r#"["http://tauri.localhost","https://tauri.localhost","http://localhost:1420"]"#,
             ),
             ("ENABLE_UI", "false"),
         ],

@@ -48,7 +48,7 @@ cat > /etc/systemd/system/ollama.service.d/override.conf <<'EOF'
 # Tauri webview (+ vite dev), never *, so a web page in the user's browser
 # cannot drive Ollama.
 Environment=OLLAMA_HOST=127.0.0.1
-Environment=OLLAMA_ORIGINS=http://tauri.localhost,https://tauri.localhost,tauri://localhost,http://localhost:1420
+Environment=OLLAMA_ORIGINS=http://tauri.localhost,https://tauri.localhost,http://localhost:1420
 Environment=OLLAMA_CONTEXT_LENGTH=16384
 Environment=OLLAMA_FLASH_ATTENTION=1
 Environment=OLLAMA_KV_CACHE_TYPE=q8_0
