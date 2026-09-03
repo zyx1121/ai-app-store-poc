@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { ChevronDown } from "lucide-react";
 import {
+  launchSpace,
   listInstances,
   onInstanceUpdate,
   openUrl,
@@ -10,6 +11,7 @@ import {
 } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Textarea } from "@/components/ui/textarea";
 import {
   Card,
   CardContent,
@@ -43,21 +45,74 @@ function upsert(list: Instance[], next: Instance): Instance[] {
   return copy;
 }
 
+/** `NAME=value` per line, one env var each; parsing is forgiving (blank lines,
+ * no `=`, are just skipped) since this is a small manual retry form, not a form
+ * with per-field validation (#57). */
+function parseEnvLines(text: string): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const line of text.split("\n")) {
+    const idx = line.indexOf("=");
+    if (idx <= 0) continue;
+    const name = line.slice(0, idx).trim();
+    const value = line.slice(idx + 1).trim();
+    if (name) env[name] = value;
+  }
+  return env;
+}
+
+/** A Space that failed to launch (missing secret, gated model without a
+ * token) can be retried here with corrected values, without going back to
+ * Browse (#57). */
+function EnvRetry({ onRetry }: { onRetry: (env: Record<string, string>) => void }) {
+  const [text, setText] = useState("");
+  const [retrying, setRetrying] = useState(false);
+
+  async function submit() {
+    setRetrying(true);
+    try {
+      await onRetry(parseEnvLines(text));
+    } finally {
+      setRetrying(false);
+    }
+  }
+
+  return (
+    <div className="flex flex-col gap-1.5 rounded-lg border border-border p-2">
+      <label className="text-xs text-muted-foreground">
+        Secrets this app reads from its environment, one NAME=value per line
+      </label>
+      <Textarea
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        rows={2}
+        className="font-mono text-xs"
+        placeholder="tryon_url=https://..."
+      />
+      <Button size="sm" variant="outline" onClick={submit} disabled={retrying} className="self-start">
+        {retrying ? "Retrying..." : "Retry with these values"}
+      </Button>
+    </div>
+  );
+}
+
 function InstanceCard({
   instance,
   onOpenChat,
   onStop,
   onRemove,
+  onRetry,
 }: {
   instance: Instance;
   onOpenChat: (instanceId: string) => void;
   onStop: (id: string) => void;
   onRemove: (id: string) => void;
+  onRetry: (repo: string, env: Record<string, string>) => void;
 }) {
   const canOpen = instance.kind === "space" && instance.status === "running" && instance.url;
   const canChat = instance.kind === "model" && instance.status === "running";
   const canStop = instance.status !== "stopped";
   const canRemove = instance.status === "stopped" || instance.status === "error";
+  const canRetry = instance.kind === "space" && instance.status === "error";
 
   return (
     <Card>
@@ -77,6 +132,7 @@ function InstanceCard({
         </div>
         {instance.error && <p className="text-xs text-destructive">{instance.error}</p>}
         <LogTail lines={instance.log_tail} />
+        {canRetry && <EnvRetry onRetry={(env) => onRetry(instance.repo, env)} />}
       </CardContent>
       <CardFooter className="flex gap-2">
         {canOpen && (
@@ -137,6 +193,12 @@ export function Running({ onOpenChat }: { onOpenChat: (instanceId: string) => vo
     setInstances((prev) => prev.filter((i) => !ids.includes(i.id)));
   }
 
+  /** Relaunches the same repo with the env values the user just supplied
+   * (#57); the instance update event refreshes this card as usual. */
+  async function handleRetry(repo: string, env: Record<string, string>) {
+    await launchSpace(repo, env);
+  }
+
   if (instances.length === 0) {
     return (
       <div className="flex flex-col gap-3 p-6">
@@ -166,6 +228,7 @@ export function Running({ onOpenChat }: { onOpenChat: (instanceId: string) => vo
           onOpenChat={onOpenChat}
           onStop={handleStop}
           onRemove={handleRemove}
+          onRetry={handleRetry}
         />
       ))}
 
@@ -199,6 +262,7 @@ export function Running({ onOpenChat }: { onOpenChat: (instanceId: string) => vo
                 onOpenChat={onOpenChat}
                 onStop={handleStop}
                 onRemove={handleRemove}
+                onRetry={handleRetry}
               />
             ))}
           </CollapsibleContent>
