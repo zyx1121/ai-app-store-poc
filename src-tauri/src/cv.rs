@@ -266,6 +266,9 @@ pub async fn detect(
         )));
     }
     let detections = postprocess(&out.data, lb, min_score);
+    // A live detection loop calls this every frame; that is the CV service's
+    // idle timer reset (#65).
+    services::touch(app, services::ServiceId::Cv);
     Ok(DetectResult {
         model: det.name.to_string(),
         backend,
