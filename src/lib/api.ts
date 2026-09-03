@@ -236,9 +236,6 @@ export const buildSpace = (
 export const launchModel = (repo: string, quant: string, leaseId?: string | null) =>
   invoke<Instance>("launch_model", { repo, quant, leaseId });
 
-/** Size of a Space's image on the registry, in MB, from `docker manifest inspect`; null when unreadable. */
-export const spaceImageSize = (id: string) => invoke<number | null>("space_image_size", { id });
-
 export const listInstances = () => invoke<Instance[]>("list_instances");
 
 export const stopInstance = (id: string) => invoke<void>("stop_instance", { id });

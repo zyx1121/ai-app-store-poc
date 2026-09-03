@@ -6,7 +6,6 @@ import {
   modelFiles,
   searchModels,
   searchSpaces,
-  spaceImageSize,
   type GgufFile,
   type ModelSummary,
   type SpaceSummary,
@@ -62,31 +61,6 @@ function saveBoolPreference(key: string, value: boolean) {
 }
 
 type BuildConsent = { proceed: boolean; useRepoDockerfile: boolean };
-
-/**
- * Lazily fetches a Space's image size for the Browse card badge (#55). One
- * request per card, cached on the Rust side by image so a re-render or a
- * second card for the same Space is free; failures (private, gated, static
- * Spaces with no image) are silent and just render nothing.
- */
-function SpaceImageSizeBadge({ spaceId }: { spaceId: string }) {
-  const [mb, setMb] = useState<number | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    spaceImageSize(spaceId)
-      .then((size) => {
-        if (!cancelled) setMb(size);
-      })
-      .catch(() => {});
-    return () => {
-      cancelled = true;
-    };
-  }, [spaceId]);
-
-  if (mb === null) return null;
-  return <span>{formatBytes(mb * 1024 * 1024)} image</span>;
-}
 
 function CardGridSkeleton() {
   return (
@@ -413,7 +387,6 @@ export function Browse({ onLaunched }: { onLaunched: () => void }) {
                         Needs secrets: {space.secrets.join(", ")}
                       </span>
                     )}
-                    {space.sdk !== "static" && <SpaceImageSizeBadge spaceId={space.id} />}
                   </CardContent>
                   <CardFooter className="flex gap-2">
                     <Button

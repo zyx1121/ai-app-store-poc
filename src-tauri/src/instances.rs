@@ -387,8 +387,10 @@ async fn image_size_mb(image: &str) -> Option<u64> {
     sum_layers(&v2)
 }
 
-/// Cached `image_size_mb`, keyed by image reference so a re-launch or a second
-/// Browse card for the same image skips the round trip (#55).
+/// Cached `image_size_mb`, keyed by image reference so a re-launch of the same
+/// Space skips the round trip. Called from exactly one place, `run_space`
+/// right before its pull: Browse never triggers `docker manifest inspect`
+/// itself, so browsing a search never fans out a `wsl.exe` spawn per card (#55).
 async fn cached_image_size_mb(state: &AppState, image: &str) -> Option<u64> {
     if let Some(mb) = state
         .image_sizes_mb
@@ -449,14 +451,6 @@ fn parse_pull_progress(line: &str, layers: &mut HashMap<String, (u64, u64)>) -> 
         .values()
         .fold((0u64, 0u64), |(d, t), (c, n)| (d + c, t + n));
     (total > 0).then(|| ((done as f64 / total as f64) * 100.0).min(100.0) as u32)
-}
-
-/// Size of a Space's registry image, in MB, without pulling it. For the
-/// Browse card badge; the launch path calls `cached_image_size_mb` itself,
-/// right before the pull it is about to do anyway (#55).
-pub async fn space_image_size(app: &AppHandle, id: &str) -> Option<u64> {
-    let image = format!("registry.hf.space/{}:latest", slug(id));
-    cached_image_size_mb(&app.state::<AppState>(), &image).await
 }
 
 // `cancel` (#35/#76) and `secrets` (#57) each added one parameter on top of

@@ -118,12 +118,6 @@ async fn launch_model(
     cmd(instances::launch_model(app, repo, quant, lease_id).await)
 }
 
-/// Size of a Space's registry image, in MB, without pulling it (#55).
-#[tauri::command]
-async fn space_image_size(app: AppHandle, id: String) -> Option<u64> {
-    instances::space_image_size(&app, &id).await
-}
-
 #[tauri::command]
 async fn list_instances(app: AppHandle) -> CmdResult<Vec<instances::Instance>> {
     instances::discover(&app).await;
@@ -366,7 +360,6 @@ pub fn run() {
             launch_space,
             build_space,
             launch_model,
-            space_image_size,
             list_instances,
             stop_instance,
             remove_instance,
