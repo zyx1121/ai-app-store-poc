@@ -56,6 +56,10 @@ pub struct Instance {
     pub started_at: String,
     /// image was built on this machine instead of pulled from the Hub
     pub local_build: bool,
+    /// container was started with `--gpus all`; only these count as GPU
+    /// residents (#58)
+    #[serde(default)]
+    pub gpu: bool,
 }
 
 fn now() -> String {
@@ -179,6 +183,9 @@ async fn start_space(
             return Ok(existing);
         }
     }
+    // CPU-tier Spaces run without the GPU: the same rule Browse uses to skip
+    // the gate, so they never count as residents either (#58).
+    let gpu = state.has_gpu() && space.wants_gpu();
     let inst = Instance {
         id: inst_id.clone(),
         kind: Kind::Space,
@@ -196,10 +203,10 @@ async fn start_space(
         log_tail: vec![],
         started_at: now(),
         local_build,
+        gpu,
     };
     insert(&state, inst.clone());
 
-    let gpu = state.has_gpu();
     let vendor = state.vendor();
     let app2 = app.clone();
     tokio::spawn(async move {
@@ -300,12 +307,14 @@ async fn run_space(
 
     let port = free_port()?;
     let gpu_flag = if gpu { "--gpus all" } else { "" };
+    let gpu_label = u8::from(gpu);
     let repo = &space.id;
     let publish = wsl::publish(port, app_port);
     let run = format!(
         "docker rm -f {cname} >/dev/null 2>&1; \
          docker run -d --name {cname} {gpu_flag} {publish} \
            --label aias.kind=space --label aias.repo='{repo}' --label aias.port={port} \
+           --label aias.gpu={gpu_label} \
            -v {HF_CACHE_VOLUME}:/home/user/.cache/huggingface \
            -e HF_HOME=/home/user/.cache/huggingface \
            -e PORT={app_port} -e GRADIO_SERVER_NAME=0.0.0.0 -e GRADIO_SERVER_PORT={app_port} \
@@ -430,6 +439,7 @@ pub async fn launch_model(app: AppHandle, repo: String, quant: String) -> Result
         log_tail: vec![],
         started_at: now(),
         local_build: false,
+        gpu: false,
     };
     insert(&state, inst.clone());
 
@@ -570,7 +580,7 @@ pub async fn discover(app: &AppHandle) {
         }
         *done = true;
     }
-    let list = "docker ps --filter label=aias.kind=space --format '{{.Names}}\t{{.Label \"aias.repo\"}}\t{{.Label \"aias.port\"}}\t{{.Status}}'";
+    let list = "docker ps --filter label=aias.kind=space --format '{{.Names}}\t{{.Label \"aias.repo\"}}\t{{.Label \"aias.port\"}}\t{{.Status}}\t{{.Label \"aias.gpu\"}}'";
     let Ok(o) = wsl::sh(list).await else { return };
     for line in o.stdout.lines() {
         let parts: Vec<&str> = line.split('\t').collect();
@@ -600,6 +610,7 @@ pub async fn discover(app: &AppHandle) {
                 log_tail: vec![format!("adopted running container ({})", parts[3])],
                 started_at: now(),
                 local_build: false,
+                gpu: parts.get(4).map(|g| g.trim() == "1").unwrap_or(false),
             },
         );
         if let Some(inst) = get(&state, &id) {

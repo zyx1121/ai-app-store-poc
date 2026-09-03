@@ -256,7 +256,10 @@ pub async fn memory(app: &AppHandle) -> GpuMemory {
 
     if state.has_gpu() {
         for inst in instances::list(&state) {
-            if inst.kind == instances::Kind::Space && inst.status == instances::Status::Running {
+            if inst.kind == instances::Kind::Space
+                && inst.status == instances::Status::Running
+                && inst.gpu
+            {
                 residents.push(Resident {
                     kind: ResidentKind::Space,
                     id: inst.id,
