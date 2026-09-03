@@ -10,6 +10,7 @@ mod ollama;
 mod runtime;
 mod services;
 mod state;
+mod storage;
 mod wsl;
 
 use tauri::{AppHandle, Manager, State};
@@ -169,6 +170,41 @@ async fn cv_detect(
     cmd(cv::detect(&app, &model, bytes, min_score).await)
 }
 
+/// Disk usage: Docker images, build cache, the shared HF cache, our local
+/// build directory, and the WSL virtual disk on Windows (#63).
+#[tauri::command]
+async fn storage_usage() -> CmdResult<storage::StorageUsage> {
+    Ok(storage::usage().await)
+}
+
+/// Free up space per the given options. Progress arrives on `storage://progress`.
+#[tauri::command]
+async fn storage_cleanup(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    options: storage::CleanupOptions,
+) -> CmdResult<storage::CleanupResult> {
+    cmd(storage::cleanup(&app, &state, options).await)
+}
+
+/// Write a WSL2 memory ceiling to `%USERPROFILE%\.wslconfig` if none exists
+/// yet (#64). `provision_runtime` already does this; exposed separately so
+/// the Setup screen can offer it to a user who skipped provisioning or wants
+/// to retry after deleting a bad file.
+#[tauri::command]
+fn write_wslconfig(state: State<'_, AppState>) -> CmdResult<String> {
+    let total_ram_mb = state
+        .runtime
+        .lock()
+        .ok()
+        .and_then(|r| r.as_ref().and_then(|s| s.hardware.total_ram_mb));
+    match runtime::write_wslconfig(total_ram_mb) {
+        runtime::WslConfigOutcome::Written(path) => Ok(format!("wrote {path}")),
+        runtime::WslConfigOutcome::Kept => Ok("existing .wslconfig kept".into()),
+        runtime::WslConfigOutcome::Error(e) => Err(e),
+    }
+}
+
 #[tauri::command]
 fn open_url(app: AppHandle, url: String) -> CmdResult<()> {
     if !(url.starts_with("http://") || url.starts_with("https://")) {
@@ -199,6 +235,11 @@ pub fn run() {
                 let state = handle.state::<AppState>();
                 let s = runtime::refresh(&state).await;
                 log::info!("runtime at startup: {s:?}");
+                // Sized once from the hardware probe; Space containers read it
+                // on every launch (#64).
+                if let Ok(mut g) = state.container_memory_cap_mb.lock() {
+                    *g = Some(runtime::container_memory_cap_mb(s.hardware.total_ram_mb));
+                }
                 instances::discover(&handle).await;
             });
             Ok(())
@@ -234,6 +275,9 @@ pub fn run() {
             gpu_memory,
             gpu_plan,
             gpu_release,
+            storage_usage,
+            storage_cleanup,
+            write_wslconfig,
             open_url,
         ])
         .run(tauri::generate_context!())
