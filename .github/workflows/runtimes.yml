@@ -86,8 +86,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # `grep` exits 1 when no runtimes-vN release exists yet (the first run);
+          # under `pipefail` that would abort the step before `latest` can default
+          # to empty, so let a no-match fall through instead of failing the job.
           latest=$(gh release list --repo "$GITHUB_REPOSITORY" --json tagName -q '.[].tagName' \
-            | grep -E '^runtimes-v[0-9]+$' | sed 's/runtimes-v//' | sort -n | tail -1)
+            | { grep -E '^runtimes-v[0-9]+$' || true; } | sed 's/runtimes-v//' | sort -n | tail -1)
           next=$(( ${latest:-0} + 1 ))
           echo "tag=runtimes-v$next" >> "$GITHUB_OUTPUT"
 
