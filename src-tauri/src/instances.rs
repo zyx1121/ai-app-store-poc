@@ -297,10 +297,13 @@ async fn run_space(
 
     // Docker creates a named volume as root the first time it is mounted, and a
     // Space runs as uid 1000 (`user`), so the cache must be handed over before
-    // the first write or `hf_hub_download` dies with EACCES (#49). Only the
-    // top level: subdirectories are created by the Space itself.
+    // the first write or `hf_hub_download` dies with EACCES (#49). Done from
+    // the distro (we are root there) on the volume's mountpoint: never by
+    // running a binary from the untrusted image as root. Only the top level:
+    // subdirectories are created by the Space itself.
     wsl::sh(&format!(
-        "docker run --rm --user 0 -v {HF_CACHE_VOLUME}:/c --entrypoint chown {image} 1000:1000 /c"
+        "docker volume create {HF_CACHE_VOLUME} >/dev/null && \
+         chown 1000:1000 \"$(docker volume inspect -f '{{{{.Mountpoint}}}}' {HF_CACHE_VOLUME})\""
     ))
     .await?
     .require("chown hf cache")?;
@@ -310,9 +313,10 @@ async fn run_space(
     let gpu_label = u8::from(gpu);
     let repo = &space.id;
     let publish = wsl::publish(port, app_port);
+    let harden = wsl::HARDEN;
     let run = format!(
         "docker rm -f {cname} >/dev/null 2>&1; \
-         docker run -d --name {cname} {gpu_flag} {publish} \
+         docker run -d --name {cname} {gpu_flag} {publish} {harden} \
            --label aias.kind=space --label aias.repo='{repo}' --label aias.port={port} \
            --label aias.gpu={gpu_label} \
            -v {HF_CACHE_VOLUME}:/home/user/.cache/huggingface \

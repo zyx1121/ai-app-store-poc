@@ -132,7 +132,13 @@ const SPEACHES: ServiceSpec = ServiceSpec {
         container: "aias-svc-speaches",
         container_port: 8000,
         gpu: true,
-        env: &[("ALLOW_ORIGINS", r#"["*"]"#), ("ENABLE_UI", "false")],
+        env: &[
+            (
+                "ALLOW_ORIGINS",
+                r#"["http://tauri.localhost","https://tauri.localhost","http://localhost:1420"]"#,
+            ),
+            ("ENABLE_UI", "false"),
+        ],
         volumes: &[("aias-speaches-cache", "/home/ubuntu/.cache/huggingface/hub")],
         cmd: "",
         model_store: None,
@@ -148,7 +154,13 @@ const SPEACHES_CPU: ServiceSpec = ServiceSpec {
         container: "aias-svc-speaches",
         container_port: 8000,
         gpu: false,
-        env: &[("ALLOW_ORIGINS", r#"["*"]"#), ("ENABLE_UI", "false")],
+        env: &[
+            (
+                "ALLOW_ORIGINS",
+                r#"["http://tauri.localhost","https://tauri.localhost","http://localhost:1420"]"#,
+            ),
+            ("ENABLE_UI", "false"),
+        ],
         volumes: &[("aias-speaches-cache", "/home/ubuntu/.cache/huggingface/hub")],
         cmd: "",
         model_store: None,
@@ -173,7 +185,10 @@ const COMFYUI: ServiceSpec = ServiceSpec {
         container_port: 8188,
         gpu: true,
         // The boot image reads its flags from CLI_ARGS; --lowvram keeps a 10 GB card usable next to an LLM.
-        env: &[("CLI_ARGS", "--enable-cors-header --lowvram")],
+        env: &[(
+            "CLI_ARGS",
+            "--enable-cors-header http://tauri.localhost --lowvram",
+        )],
         // The image installs ComfyUI under /root on first start; one volume keeps app, models and outputs.
         volumes: &[("aias-comfyui-root", "/root")],
         cmd: "",
@@ -1118,7 +1133,8 @@ async fn run_container(app: &AppHandle, s: &ServiceSpec, gpu: bool) -> Result<()
     let run = format!(
         "docker rm -f {container} >/dev/null 2>&1; \
          docker run -d --name {container} --restart unless-stopped {gpu_flag} \
-           {publish} {env} {volumes} --label aias.kind=service {image} {cmd}",
+           {} {publish} {env} {volumes} --label aias.kind=service {image} {cmd}",
+        wsl::HARDEN,
     );
     push_log(app, id, format!("docker run {publish} {image}"));
     wsl::sh(&run).await?.require("docker run")?;

@@ -119,9 +119,16 @@ pub async fn is_up() -> bool {
     reachable_base().await.is_some()
 }
 
+/// Origins allowed to call the local inference servers: the Tauri webview on
+/// each platform plus the vite dev server. Never `*`: any web page open in
+/// the user's browser could otherwise drive Ollama / ComfyUI on localhost.
+/// Ollama panics on any scheme other than http(s), so no `tauri://` entry.
+pub const WEBVIEW_ORIGINS: &str =
+    "http://tauri.localhost,https://tauri.localhost,http://localhost:1420";
+
 fn native_env(cmd: &mut Command) {
     cmd.env("OLLAMA_HOST", format!("127.0.0.1:{PORT}"))
-        .env("OLLAMA_ORIGINS", "*")
+        .env("OLLAMA_ORIGINS", WEBVIEW_ORIGINS)
         .env("OLLAMA_CONTEXT_LENGTH", "16384")
         .env("OLLAMA_FLASH_ATTENTION", "1")
         .env("OLLAMA_KV_CACHE_TYPE", "q8_0")

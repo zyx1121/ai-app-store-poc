@@ -97,6 +97,12 @@ pub fn quote(s: &str) -> String {
 
 /// `docker run -p` flag that publishes on loopback only. WSL2's port relay still
 /// exposes it to Windows `localhost`, but nothing on the LAN can reach it.
+/// Flags every third-party container gets: no privilege escalation inside,
+/// and a fork cap so one bad Space cannot take the whole VM down with it.
+/// Capabilities are left at Docker's default set because Space entrypoints
+/// routinely chown / setuid on start.
+pub const HARDEN: &str = "--security-opt no-new-privileges --pids-limit 4096";
+
 pub fn publish(host_port: u16, container_port: u16) -> String {
     format!("-p 127.0.0.1:{host_port}:{container_port}")
 }
