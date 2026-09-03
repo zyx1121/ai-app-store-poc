@@ -435,9 +435,11 @@ fn summarize_model(m: RawModel) -> ModelSummary {
             Compat::Maybe,
             Some("No pipeline tag on the Hub; may not be a chat model".into()),
         ),
+        // Ollama pulls the vision projector alongside the weights (verified
+        // with unsloth/Qwen3.5-9B-GGUF); the Chat screen only sends text.
         Some("image-text-to-text") => (
-            Compat::Maybe,
-            Some("Vision model; needs a matching mmproj file, chat UI is text only".into()),
+            Compat::Ready,
+            Some("Vision model; the Chat screen sends text only".into()),
         ),
         Some(other) => (
             Compat::Incompatible,
@@ -470,7 +472,11 @@ pub async fn model_files(state: &AppState, repo: &str) -> Result<Vec<GgufFile>> 
         token.as_deref(),
     )
     .await?;
-    let quant_re = Regex::new(r"(?i)[-_.]((?:I?Q\d[A-Z0-9_]*)|BF16|F16|F32|FP16)\.gguf$").unwrap();
+    // The tag Ollama pulls by is the whole suffix after the model name, so
+    // unsloth's dynamic quants keep their `UD-` prefix (`:UD-IQ2_XXS`);
+    // `:IQ2_XXS` alone fails with "file does not exist".
+    let quant_re =
+        Regex::new(r"(?i)[-_.]((?:UD-)?(?:I?Q\d[A-Z0-9_]*)|BF16|F16|F32|FP16)\.gguf$").unwrap();
     let shard_re = Regex::new(r"-\d{5}-of-\d{5}\.gguf$").unwrap();
     let mut files: Vec<GgufFile> = m
         .siblings
@@ -760,6 +766,20 @@ mod tests {
             space_compat(Some("gradio"), Some("SLEEPING"), Some("cpu-basic"), true).0,
             Compat::Ready
         );
+    }
+
+    #[test]
+    fn quant_tag_keeps_unsloth_ud_prefix() {
+        let re =
+            Regex::new(r"(?i)[-_.]((?:UD-)?(?:I?Q\d[A-Z0-9_]*)|BF16|F16|F32|FP16)\.gguf$").unwrap();
+        let cap = |n: &str| re.captures(n).map(|c| c[1].to_ascii_uppercase());
+        assert_eq!(
+            cap("Qwen3.5-9B-UD-IQ2_XXS.gguf").as_deref(),
+            Some("UD-IQ2_XXS")
+        );
+        assert_eq!(cap("Qwen3.5-9B-Q4_K_M.gguf").as_deref(), Some("Q4_K_M"));
+        assert_eq!(cap("Qwen3.5-9B-BF16.gguf").as_deref(), Some("BF16"));
+        assert_eq!(cap("model.gguf"), None);
     }
 
     #[test]
