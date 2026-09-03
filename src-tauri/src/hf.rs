@@ -409,11 +409,17 @@ async fn get<T: for<'de> Deserialize<'de>>(http: &reqwest::Client, url: &str) ->
 /// Card fields end up in a shell command (`python {app_file}`) and a Dockerfile
 /// (`gradio=={sdk_version}`). Anyone can publish a Space, so these are
 /// allowlists: a value that fails falls back to the default, never gets patched.
+/// A relative path is fine (`demos/musicgen_app.py`); `..`, hidden
+/// segments and an absolute path are not.
 fn safe_app_file(f: &str) -> bool {
     !f.is_empty()
-        && !f.starts_with('.')
-        && f.chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        && f.split('/').all(|seg| {
+            !seg.is_empty()
+                && !seg.starts_with('.')
+                && seg
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        })
 }
 
 fn safe_sdk_version(v: &str) -> bool {
@@ -536,9 +542,24 @@ mod tests {
         .unwrap();
         let s = summarize_space(raw, None, true);
         assert_eq!(s.app_file, "demo_v2.py");
+
+        // facebook/MusicGen keeps its entry point in a subdirectory (#46).
+        for (given, want) in [
+            ("demos/musicgen_app.py", "demos/musicgen_app.py"),
+            ("../etc/passwd", "app.py"),
+            ("/app.py", "app.py"),
+            ("demos/.hidden.py", "app.py"),
+            ("demos//x.py", "app.py"),
+        ] {
+            let raw: RawSpace = serde_json::from_str(&format!(
+                r#"{{"id":"a/b","sdk":"gradio","cardData":{{"app_file":"{given}"}}}}"#
+            ))
+            .unwrap();
+            assert_eq!(summarize_space(raw, None, true).app_file, want, "{given}");
+        }
         assert_eq!(s.sdk_version.as_deref(), Some("4.44.1"));
 
-        for bad in ["", ".env", "sub/app.py", "a b.py", "`id`.py", "$(x).py"] {
+        for bad in ["", ".env", "../app.py", "a b.py", "`id`.py", "$(x).py"] {
             assert!(!safe_app_file(bad), "{bad:?} should be rejected");
         }
         for bad in ["", "5.0.0\"", "5 && x", "5;x"] {
