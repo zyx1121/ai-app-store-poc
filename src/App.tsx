@@ -3,6 +3,7 @@ import { Camera, MessageSquare, Mic, Palette, Play, Settings, Store } from "luci
 import { runtimeStatus, type RuntimeStatus } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { TitleBar } from "@/components/TitleBar";
 import { Setup } from "@/screens/Setup";
 import { Browse } from "@/screens/Browse";
 import { Running } from "@/screens/Running";
@@ -59,63 +60,65 @@ function App() {
 
   return (
     <TooltipProvider>
-      <div className="flex h-screen w-screen overflow-hidden bg-background text-foreground">
-        <aside className="flex w-48 shrink-0 flex-col gap-1 border-r border-border p-3">
-          <div className="px-2 py-2 font-heading text-sm font-medium">AI App Store</div>
-          {navItems.map(({ key, label, icon: Icon }) => (
-            <button
-              key={key}
-              type="button"
-              disabled={needsSetup && key !== "setup"}
-              onClick={() => setRoute(key)}
-              className={cn(
-                "flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-sm text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-50",
-                activeScreen === key && "bg-muted text-foreground",
-              )}
-            >
-              <Icon className="size-4" />
-              {label}
-            </button>
-          ))}
-        </aside>
+      <div className="flex h-screen w-screen flex-col overflow-hidden bg-background text-foreground">
+        <TitleBar />
+        <div className="flex min-h-0 flex-1">
+          <aside className="flex w-48 shrink-0 flex-col gap-1 border-r border-border p-3">
+            {navItems.map(({ key, label, icon: Icon }) => (
+              <button
+                key={key}
+                type="button"
+                disabled={needsSetup && key !== "setup"}
+                onClick={() => setRoute(key)}
+                className={cn(
+                  "flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-sm text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-50",
+                  activeScreen === key && "bg-muted text-foreground",
+                )}
+              >
+                <Icon className="size-4" />
+                {label}
+              </button>
+            ))}
+          </aside>
 
-        <main className="flex min-w-0 flex-1 flex-col overflow-hidden">
-          {mounted("setup") && (
-            <div className={paneClass("setup")}>
-              <Setup status={status} onStatusChange={setStatus} />
-            </div>
-          )}
-          {mounted("browse") && (
-            <div className={paneClass("browse")}>
-              <Browse onLaunched={() => setRoute("running")} />
-            </div>
-          )}
-          {mounted("running") && (
-            <div className={paneClass("running")}>
-              <Running onOpenChat={openChat} />
-            </div>
-          )}
-          {mounted("chat") && (
-            <div className={paneClass("chat", false)}>
-              <Chat initialInstanceId={chatInstanceId} />
-            </div>
-          )}
-          {mounted("audio") && (
-            <div className={paneClass("audio")}>
-              <Audio />
-            </div>
-          )}
-          {mounted("vision") && (
-            <div className={paneClass("vision")}>
-              <Vision active={activeScreen === "vision"} />
-            </div>
-          )}
-          {mounted("canvas") && (
-            <div className={paneClass("canvas")}>
-              <Canvas />
-            </div>
-          )}
-        </main>
+          <main className="flex min-w-0 flex-1 flex-col overflow-hidden">
+            {mounted("setup") && (
+              <div className={paneClass("setup")}>
+                <Setup status={status} onStatusChange={setStatus} />
+              </div>
+            )}
+            {mounted("browse") && (
+              <div className={paneClass("browse")}>
+                <Browse onLaunched={() => setRoute("running")} />
+              </div>
+            )}
+            {mounted("running") && (
+              <div className={paneClass("running")}>
+                <Running onOpenChat={openChat} />
+              </div>
+            )}
+            {mounted("chat") && (
+              <div className={paneClass("chat", false)}>
+                <Chat initialInstanceId={chatInstanceId} />
+              </div>
+            )}
+            {mounted("audio") && (
+              <div className={paneClass("audio")}>
+                <Audio />
+              </div>
+            )}
+            {mounted("vision") && (
+              <div className={paneClass("vision")}>
+                <Vision active={activeScreen === "vision"} />
+              </div>
+            )}
+            {mounted("canvas") && (
+              <div className={paneClass("canvas")}>
+                <Canvas />
+              </div>
+            )}
+          </main>
+        </div>
       </div>
     </TooltipProvider>
   );
