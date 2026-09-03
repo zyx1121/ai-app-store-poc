@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use tokio::process::Child;
 
@@ -15,7 +16,10 @@ pub struct AppState {
     pub runtime: Mutex<Option<RuntimeStatus>>,
     pub instances: Mutex<BTreeMap<String, Instance>>,
     pub keepalive: Mutex<Option<Child>>,
-    pub discovered: Mutex<bool>,
+    /// `compare_exchange`d, not just locked: `discover()` claims it before the
+    /// probe and rolls back on failure, so a transient WSL hiccup right after
+    /// launch can be retried instead of leaving the fleet unadopted forever (#38).
+    pub discovered: AtomicBool,
     pub services: Mutex<HashMap<ServiceId, ServiceStatus>>,
     /// `ollama serve` we started on Windows (non-NVIDIA machines only).
     pub native_ollama: Mutex<Option<Child>>,
@@ -24,6 +28,13 @@ pub struct AppState {
     /// Per-container `--memory` cap for Space containers (75% of the WSL2 VM's
     /// own cap), computed once from `total_ram_mb` at startup (#64).
     pub container_memory_cap_mb: Mutex<Option<u64>>,
+    /// Cancellation flag for the in-flight launch of each instance id, if any.
+    /// `stop`/`remove` flip it so the background launch task can bail between
+    /// its externally visible steps instead of finishing and reviving the
+    /// instance the user just stopped (#35).
+    pub instance_launches: Mutex<HashMap<String, Arc<AtomicBool>>>,
+    /// Same as `instance_launches`, keyed by service id (#35).
+    pub service_launches: Mutex<HashMap<ServiceId, Arc<AtomicBool>>>,
 }
 
 impl Default for AppState {
@@ -38,11 +49,13 @@ impl Default for AppState {
             runtime: Mutex::new(None),
             instances: Mutex::new(BTreeMap::new()),
             keepalive: Mutex::new(None),
-            discovered: Mutex::new(false),
+            discovered: AtomicBool::new(false),
             services: Mutex::new(HashMap::new()),
             native_ollama: Mutex::new(None),
             native_services: Mutex::new(HashMap::new()),
             container_memory_cap_mb: Mutex::new(None),
+            instance_launches: Mutex::new(HashMap::new()),
+            service_launches: Mutex::new(HashMap::new()),
         }
     }
 }
@@ -110,6 +123,60 @@ impl AppState {
             match crate::wsl::spawn_keepalive() {
                 Ok(child) => *guard = Some(child),
                 Err(e) => log::warn!("keepalive: {e}"),
+            }
+        }
+    }
+
+    /// Reserve a fresh cancellation flag for a new launch of `id`, replacing
+    /// any stale one left by a finished or already-cancelled launch (#35).
+    pub fn begin_instance_launch(&self, id: &str) -> Arc<AtomicBool> {
+        let flag = Arc::new(AtomicBool::new(false));
+        if let Ok(mut m) = self.instance_launches.lock() {
+            m.insert(id.to_string(), flag.clone());
+        }
+        flag
+    }
+
+    /// Tell whatever launch owns `id` to stop at its next checkpoint.
+    pub fn cancel_instance_launch(&self, id: &str) {
+        if let Ok(m) = self.instance_launches.lock() {
+            if let Some(flag) = m.get(id) {
+                flag.store(true, Ordering::SeqCst);
+            }
+        }
+    }
+
+    /// Release the launch slot for `id`, but only if nobody started a newer
+    /// launch for the same id in the meantime.
+    pub fn end_instance_launch(&self, id: &str, flag: &Arc<AtomicBool>) {
+        if let Ok(mut m) = self.instance_launches.lock() {
+            if m.get(id).is_some_and(|current| Arc::ptr_eq(current, flag)) {
+                m.remove(id);
+            }
+        }
+    }
+
+    /// Same as `begin_instance_launch`, keyed by service id (#35).
+    pub fn begin_service_launch(&self, id: ServiceId) -> Arc<AtomicBool> {
+        let flag = Arc::new(AtomicBool::new(false));
+        if let Ok(mut m) = self.service_launches.lock() {
+            m.insert(id, flag.clone());
+        }
+        flag
+    }
+
+    pub fn cancel_service_launch(&self, id: ServiceId) {
+        if let Ok(m) = self.service_launches.lock() {
+            if let Some(flag) = m.get(&id) {
+                flag.store(true, Ordering::SeqCst);
+            }
+        }
+    }
+
+    pub fn end_service_launch(&self, id: ServiceId, flag: &Arc<AtomicBool>) {
+        if let Ok(mut m) = self.service_launches.lock() {
+            if m.get(&id).is_some_and(|current| Arc::ptr_eq(current, flag)) {
+                m.remove(&id);
             }
         }
     }
