@@ -288,6 +288,16 @@ async fn run_space(
         )));
     }
 
+    // Docker creates a named volume as root the first time it is mounted, and a
+    // Space runs as uid 1000 (`user`), so the cache must be handed over before
+    // the first write or `hf_hub_download` dies with EACCES (#49). Only the
+    // top level: subdirectories are created by the Space itself.
+    wsl::sh(&format!(
+        "docker run --rm --user 0 -v {HF_CACHE_VOLUME}:/c --entrypoint chown {image} 1000:1000 /c"
+    ))
+    .await?
+    .require("chown hf cache")?;
+
     let port = free_port()?;
     let gpu_flag = if gpu { "--gpus all" } else { "" };
     let repo = &space.id;
