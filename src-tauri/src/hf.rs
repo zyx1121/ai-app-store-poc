@@ -410,24 +410,31 @@ pub async fn search_models(
     limit: usize,
 ) -> Result<Vec<ModelSummary>> {
     let limit = limit.clamp(1, 60);
-    // Only text-generation repos: Ollama serves LLM GGUFs, and a diffusion or
-    // embedding GGUF (e.g. sd-turbo) pulls fine but 500s on /api/generate.
-    let mut url = format!(
-        "{HF}/models?limit={limit}&filter=gguf&pipeline_tag=text-generation&sort=downloads&direction=-1"
-    );
+    let mut url = format!("{HF}/models?limit={limit}&filter=gguf&sort=downloads&direction=-1");
     if !query.trim().is_empty() {
         url.push_str(&format!("&search={}", urlencode(query.trim())));
     }
     let token = state.hf_token();
     let raw: Vec<RawModel> = get(&state.http, &url, token.as_deref()).await?;
-    Ok(raw.into_iter().map(summarize_model).collect())
+    // A diffusion or embedding GGUF (sd-turbo) pulls fine and then 500s on
+    // /api/generate; there is nothing the user can do with it here, so it is
+    // dropped rather than shown as Incompatible.
+    Ok(raw
+        .into_iter()
+        .map(summarize_model)
+        .filter(|m| m.compat != Compat::Incompatible)
+        .collect())
 }
 
 fn summarize_model(m: RawModel) -> ModelSummary {
     let (author, name) = split_repo(&m.id);
     let author = m.author.unwrap_or(author);
     let (compat, reason) = match m.pipeline_tag.as_deref() {
-        None | Some("text-generation") => (Compat::Ready, None),
+        Some("text-generation") => (Compat::Ready, None),
+        None => (
+            Compat::Maybe,
+            Some("No pipeline tag on the Hub; may not be a chat model".into()),
+        ),
         Some("image-text-to-text") => (
             Compat::Maybe,
             Some("Vision model; needs a matching mmproj file, chat UI is text only".into()),
