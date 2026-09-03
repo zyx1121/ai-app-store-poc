@@ -184,6 +184,8 @@ export type Instance = {
   started_at: string;
   /** image was built on this machine instead of pulled from the Hub */
   local_build: boolean;
+  /** container was started with the GPU; CPU-tier Spaces run without it */
+  gpu: boolean;
 };
 
 export const launchSpace = (id: string) => invoke<Instance>("launch_space", { id });

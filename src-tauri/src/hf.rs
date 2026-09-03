@@ -36,6 +36,18 @@ pub struct SpaceSummary {
     pub compat_reason: Option<String>,
 }
 
+impl SpaceSummary {
+    /// Spaces on a GPU tier hold VRAM of their own; CPU tiers (and Spaces
+    /// with no tier at all) run without the device. Mirrors `spaceWantsGpu`
+    /// in the Browse screen.
+    pub fn wants_gpu(&self) -> bool {
+        self.hardware
+            .as_deref()
+            .map(|h| !h.starts_with("cpu"))
+            .unwrap_or(false)
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ModelSummary {
     pub id: String,
@@ -510,6 +522,21 @@ mod tests {
             space_compat(Some("gradio"), Some("SLEEPING"), Some("cpu-basic"), true).0,
             Compat::Ready
         );
+    }
+
+    #[test]
+    fn cpu_tiers_and_unknown_tiers_do_not_want_the_gpu() {
+        let mk = |hw: Option<&str>| {
+            let raw: RawSpace = serde_json::from_str(r#"{"id":"a/b","sdk":"gradio"}"#).unwrap();
+            let mut s = summarize_space(raw, None, true);
+            s.hardware = hw.map(str::to_string);
+            s
+        };
+        assert!(mk(Some("zero-a10g")).wants_gpu());
+        assert!(mk(Some("t4-medium")).wants_gpu());
+        assert!(!mk(Some("cpu-basic")).wants_gpu());
+        assert!(!mk(Some("cpu-upgrade")).wants_gpu());
+        assert!(!mk(None).wants_gpu());
     }
 
     #[test]
