@@ -45,6 +45,21 @@ pub struct AppState {
     /// Optional Hugging Face access token; loaded from disk at startup, kept
     /// here only in memory otherwise (#60).
     pub hf_token: Mutex<Option<String>>,
+    /// Set after a successful ComfyUI `/free`; cleared once torch reports it
+    /// resident again. While set, `gpu.rs` counts only the CUDA context instead
+    /// of the launch-estimate floor (#54).
+    pub comfyui_freed: Mutex<bool>,
+    /// Last time the app itself used a light platform service (Speaches, CV);
+    /// drives the idle auto-stop timer (#65). Updated by `services::touch`.
+    pub service_last_used: Mutex<HashMap<ServiceId, Instant>>,
+    /// GPU plan leases from `gpu_plan`, keyed by lease id, valued by expiry.
+    /// Held from the plan through the matching launch so two launches cannot
+    /// double-book VRAM (#70).
+    pub gpu_leases: Mutex<HashMap<String, Instant>>,
+    /// Image sizes from `docker manifest inspect`, in MB, keyed by image
+    /// reference. Fetched once per image, right before that Space's pull;
+    /// skips the round trip on a re-launch (#55).
+    pub image_sizes_mb: Mutex<HashMap<String, u64>>,
 }
 
 impl Default for AppState {
@@ -69,6 +84,10 @@ impl Default for AppState {
             space_cache: Mutex::new(HashMap::new()),
             search_generation: AtomicU64::new(0),
             hf_token: Mutex::new(None),
+            comfyui_freed: Mutex::new(false),
+            service_last_used: Mutex::new(HashMap::new()),
+            gpu_leases: Mutex::new(HashMap::new()),
+            image_sizes_mb: Mutex::new(HashMap::new()),
         }
     }
 }

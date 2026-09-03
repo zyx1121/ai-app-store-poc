@@ -10,13 +10,12 @@
 //! UI asks before evicting; the frontend calls `plan`, shows the list, then
 //! `release` for each item and proceeds with the launch.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
 
 use crate::error::{Error, Result};
-use crate::hardware::Vendor;
 use crate::hf;
 use crate::instances;
 use crate::ollama;
@@ -29,6 +28,23 @@ const MB: u64 = 1024 * 1024;
 /// Fraction of the budget a plan may fill; the rest is headroom for the CUDA
 /// context, the compositor and allocator fragmentation.
 const HEADROOM_PERCENT: u64 = 95;
+
+/// Fraction of the budget that must be free before an unsized request (a Space
+/// whose footprint is unknown) is allowed to proceed. Evict heavy residents
+/// largest-first only until this much is clear, instead of evicting anything
+/// heavy on principle (#65).
+const UNSIZED_FREE_PERCENT: u64 = 60;
+
+/// What a running ComfyUI counts as once `/free` has dropped its models: just
+/// the CUDA context, until the next job reloads something (#54).
+const COMFYUI_FREED_ESTIMATE_MB: u64 = 500;
+
+/// Torch reserved memory above this means a job is resident again; the
+/// "freed" flag clears and ComfyUI counts at its launch-estimate floor again.
+const COMFYUI_BUSY_THRESHOLD_MB: u64 = 1024;
+
+/// How long a `gpu_plan` lease is honored before a launch must re-plan (#70).
+const LEASE_TTL: Duration = Duration::from_secs(120);
 
 /// Estimated footprint of a platform service while it serves, in MB. Measured
 /// on the RTX 3080: Speaches CUDA with faster-whisper small plus Kokoro, Triton
@@ -45,8 +61,10 @@ fn service_estimate_mb(id: ServiceId) -> u64 {
 }
 
 /// Heavy services hold a whole model family and are the eviction candidates;
-/// light ones (speech, detection) stay resident next to anything.
-fn service_is_heavy(id: ServiceId) -> bool {
+/// light ones (speech, detection) stay resident next to anything. Also the set
+/// of service starts that contend for the shared budget and so require a
+/// `gpu_plan` lease (#70).
+pub fn service_is_heavy(id: ServiceId) -> bool {
     matches!(id, ServiceId::Comfyui)
 }
 
@@ -111,6 +129,10 @@ pub struct Plan {
     pub evict: Vec<Resident>,
     /// The request fits with nothing unloaded (evict is empty for that reason).
     pub fits_without_eviction: bool,
+    /// Holds this plan's answer for `LEASE_TTL`; the matching launch must present
+    /// it, or re-plan and refuse (#70). `None` on a machine with no GPU budget,
+    /// where nothing is scheduled and no lock is needed.
+    pub lease_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -236,9 +258,21 @@ pub async fn memory(app: &AppHandle) -> GpuMemory {
                 // keeps cached: on the RTX 3080 nvidia-smi showed 2.5 GB more while
                 // /system_stats reported 32 MB reserved. Never count a running ComfyUI
                 // below its launch estimate; over-counting only costs an extra ask.
+                // Exception: after a successful `/free` (release() sets the "freed"
+                // flag) count only the CUDA context, until torch reports a job
+                // resident again (#54).
                 Some((torch, used)) => {
                     used_mb = used_mb.or(used);
-                    Some(torch.max(service_estimate_mb(id)))
+                    if torch > COMFYUI_BUSY_THRESHOLD_MB {
+                        if let Ok(mut freed) = state.comfyui_freed.lock() {
+                            *freed = false;
+                        }
+                        Some(torch.max(service_estimate_mb(id)))
+                    } else if state.comfyui_freed.lock().map(|f| *f).unwrap_or(false) {
+                        Some(torch.max(COMFYUI_FREED_ESTIMATE_MB))
+                    } else {
+                        Some(torch.max(service_estimate_mb(id)))
+                    }
                 }
                 None => Some(service_estimate_mb(id)),
             }
@@ -271,13 +305,16 @@ pub async fn memory(app: &AppHandle) -> GpuMemory {
         }
     }
 
-    if vendor == Vendor::Nvidia {
-        used_mb = nvidia_used_mb().await.or(used_mb);
-    }
-    // Whatever a runtime reports, the device holds at least what the residents
-    // account for; without nvidia-smi (Vulkan / XPU) this sum is the only figure.
-    let known: u64 = residents.iter().filter_map(|r| r.vram_mb).sum();
-    let used_mb = Some(used_mb.unwrap_or(0).max(known)).filter(|u| *u > 0);
+    // nvidia-smi is authoritative when it is available: flooring it against our
+    // own resident estimate would hide the real number Unload just produced
+    // (issue #54/#30). Elsewhere (Vulkan, XPU) there is no device-wide probe, so
+    // the residents' known total is the only figure and stays the floor.
+    let used_mb = if vendor.reports_device_memory() {
+        nvidia_used_mb().await.or(used_mb).filter(|u| *u > 0)
+    } else {
+        let known: u64 = residents.iter().filter_map(|r| r.vram_mb).sum();
+        Some(used_mb.unwrap_or(0).max(known)).filter(|u| *u > 0)
+    };
     GpuMemory {
         budget_mb,
         used_mb,
@@ -320,6 +357,7 @@ pub fn plan_for(req: &Request, mem: &GpuMemory) -> Plan {
             resident_mb: known(&stay),
             evict: vec![],
             fits_without_eviction: true,
+            lease_id: None,
         };
     }
 
@@ -327,8 +365,10 @@ pub fn plan_for(req: &Request, mem: &GpuMemory) -> Plan {
         // No budget figure (CPU machine): nothing to schedule.
         (None, _) => true,
         (Some(b), Some(n)) => known(rs) + n <= b * HEADROOM_PERCENT / 100,
-        // Unsized request on a GPU: fits only if nothing heavy is resident.
-        (Some(_), None) => !rs.iter().any(|r| r.heavy),
+        // Unsized request on a GPU (a Space with no known footprint): evict heavy
+        // residents largest-first only until enough of the budget is clear, not
+        // "any heavy resident blocks" (#65).
+        (Some(b), None) => known(rs) <= b * (100 - UNSIZED_FREE_PERCENT) / 100,
     };
 
     if fits(&stay) {
@@ -338,6 +378,7 @@ pub fn plan_for(req: &Request, mem: &GpuMemory) -> Plan {
             resident_mb: known(&stay),
             evict: vec![],
             fits_without_eviction: true,
+            lease_id: None,
         };
     }
 
@@ -358,13 +399,65 @@ pub fn plan_for(req: &Request, mem: &GpuMemory) -> Plan {
         resident_mb: known(&stay),
         evict,
         fits_without_eviction: false,
+        lease_id: None,
+    }
+}
+
+/// A lease id unique enough for one process's lifetime: not cryptographic,
+/// just distinct from whatever else is live in `AppState::gpu_leases` at once.
+fn new_lease_id() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("{nanos:x}")
+}
+
+/// Record a lease for a plan that scheduled against a real budget. Machines
+/// with no GPU budget need no lock: `plan_for` never evicts anything there.
+fn issue_lease(state: &AppState, budget_mb: Option<u64>) -> Option<String> {
+    budget_mb?;
+    let id = new_lease_id();
+    let expires = Instant::now() + LEASE_TTL;
+    if let Ok(mut leases) = state.gpu_leases.lock() {
+        leases.retain(|_, exp| *exp > Instant::now());
+        leases.insert(id.clone(), expires);
+    }
+    Some(id)
+}
+
+/// Consume a lease from `gpu_plan`. A missing or expired lease means the plan
+/// may be stale (someone else's launch or release moved the budget since):
+/// refuse instead of guessing (#70). A `None` lease is only valid when this
+/// machine has no GPU budget to schedule against.
+pub fn require_lease(
+    state: &AppState,
+    lease_id: Option<&str>,
+    budget_mb: Option<u64>,
+) -> Result<()> {
+    if budget_mb.is_none() {
+        return Ok(());
+    }
+    let Some(id) = lease_id else {
+        return Err(Error::Other("GPU plan changed, try again".into()));
+    };
+    let mut leases = state
+        .gpu_leases
+        .lock()
+        .map_err(|_| Error::Other("GPU plan changed, try again".into()))?;
+    leases.retain(|_, exp| *exp > Instant::now());
+    match leases.remove(id) {
+        Some(_) => Ok(()),
+        None => Err(Error::Other("GPU plan changed, try again".into())),
     }
 }
 
 /// What must be unloaded before `req` fits on this machine.
 pub async fn plan(app: &AppHandle, req: Request) -> Plan {
     let mem = memory(app).await;
-    plan_for(&req, &mem)
+    let mut plan = plan_for(&req, &mem);
+    plan.lease_id = issue_lease(&app.state::<AppState>(), plan.budget_mb);
+    plan
 }
 
 /// Unload one resident. Models: `keep_alive: 0` through the Ollama API (works
@@ -407,6 +500,11 @@ pub async fn release(app: &AppHandle, r: Resident) -> Result<()> {
                         // verified on the RTX 3080: device use fell from 4.1 GB to 1.6 GB
                         // within 3 s. The server stays up so the Canvas screen keeps working.
                         tokio::time::sleep(Duration::from_secs(3)).await;
+                        // Count only the CUDA context until the next job reloads
+                        // something (#54); memory() clears this once torch grows again.
+                        if let Ok(mut f) = app.state::<AppState>().comfyui_freed.lock() {
+                            *f = true;
+                        }
                         return Ok(());
                     }
                 }
@@ -538,6 +636,34 @@ mod tests {
         );
         let p = plan_for(&req, &mem(RTX_3080, vec![model("llm", 5000)]));
         assert_eq!(p.evict.len(), 1);
+    }
+
+    #[test]
+    fn unsized_request_fits_when_enough_budget_already_free() {
+        // A heavy resident alone no longer blocks an unsized launch (#65): with
+        // 60% of the 10 GB budget (6144 MB) free, 2000 MB resident already clears it.
+        let req = Request::Space {
+            id: "owner/z".into(),
+        };
+        let p = plan_for(&req, &mem(RTX_3080, vec![model("small", 2000)]));
+        assert!(p.fits_without_eviction);
+        assert!(p.evict.is_empty());
+    }
+
+    #[test]
+    fn unsized_request_evicts_only_enough_heavy_residents_to_clear_60_percent() {
+        // Two heavy residents (9 GB together) leave nowhere near 60% free; evicting
+        // only the larger one (6 GB) already clears it, so the smaller stays.
+        let m = mem(RTX_3080, vec![model("big", 6000), model("small", 3000)]);
+        let req = Request::Space {
+            id: "owner/y".into(),
+        };
+        let p = plan_for(&req, &m);
+        assert_eq!(
+            p.evict.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            ["big"]
+        );
+        assert!(!p.fits_without_eviction);
     }
 
     #[test]
