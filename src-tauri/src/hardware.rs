@@ -40,6 +40,31 @@ pub fn unified_budget_mb(total_ram_mb: Option<u64>) -> Option<u64> {
     total_ram_mb.map(|t| t / 2)
 }
 
+impl Vendor {
+    /// Only NVIDIA's GPU is handed to WSL2 containers (issue #44: this used to
+    /// be a bare `vendor == Vendor::Nvidia` match inside `runtime.rs`).
+    pub fn gpu_ok(self, docker_gpu_runtime: bool) -> bool {
+        docker_gpu_runtime && matches!(self, Vendor::Nvidia)
+    }
+
+    /// Device-wide memory in use is only readable through nvidia-smi; other
+    /// vendors have no equivalent introspection from inside WSL2 (issue #44:
+    /// this used to be a bare `vendor == Vendor::Nvidia` match in `gpu.rs`).
+    pub fn reports_device_memory(self) -> bool {
+        matches!(self, Vendor::Nvidia)
+    }
+
+    /// The name the provisioning script (`AIAS_VENDOR`) expects.
+    pub fn env_name(self) -> &'static str {
+        match self {
+            Vendor::Nvidia => "nvidia",
+            Vendor::Amd => "amd",
+            Vendor::Intel => "intel",
+            Vendor::Cpu => "cpu",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Gpu {
     pub name: String,

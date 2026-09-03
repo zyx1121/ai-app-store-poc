@@ -164,7 +164,7 @@ pub async fn status() -> RuntimeStatus {
                 _ => {}
             }
         }
-        s.gpu_ok = gpu_runtime && s.vendor == Vendor::Nvidia;
+        s.gpu_ok = s.vendor.gpu_ok(gpu_runtime);
         s.distro_running = true;
     }
     // Ollama answers on localhost whether it runs in WSL (NVIDIA) or natively (others).
@@ -388,12 +388,7 @@ pub async fn provision(app: &AppHandle, state: &AppState) -> Result<RuntimeStatu
     // A Windows checkout may have turned the script into CRLF; bash rejects that.
     let script = format!(
         "export AIAS_VENDOR={}\n{}",
-        match s.vendor {
-            Vendor::Nvidia => "nvidia",
-            Vendor::Amd => "amd",
-            Vendor::Intel => "intel",
-            Vendor::Cpu => "cpu",
-        },
+        s.vendor.env_name(),
         PROVISION_SCRIPT.replace("\r\n", "\n")
     );
     let child = emit_err(app, "provision", wsl::spawn_script(&script).await)?;
