@@ -2,11 +2,13 @@ import { Fragment, useEffect, useRef, useState } from "react";
 import {
   APP_VERSION,
   checkForUpdate,
+  hfTokenStatus,
   installUpdate,
   onProvisionProgress,
   provisionRuntime,
   relaunch,
   runtimeStatus,
+  setHfToken,
   type AvailableUpdate,
   type Gpu,
   type HardwareProfile,
@@ -17,6 +19,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
+import { Input } from "@/components/ui/input";
 import { Progress } from "@/components/ui/progress";
 import { StorageCard } from "@/components/StorageCard";
 import { Cpu, CircleCheck, CircleX, Microchip, Minus, TriangleAlert } from "lucide-react";
@@ -279,6 +282,87 @@ function UpdateCard() {
   );
 }
 
+/** Optional Hugging Face token (#60): unlocks gated models/Spaces and, once #57
+ * lands its env editor, Spaces that read HF_TOKEN themselves. */
+function TokenCard() {
+  const [hasToken, setHasToken] = useState<boolean | null>(null);
+  const [value, setValue] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    hfTokenStatus()
+      .then(setHasToken)
+      .catch(() => setHasToken(false));
+  }, []);
+
+  async function save() {
+    setSaving(true);
+    setError(null);
+    try {
+      const trimmed = value.trim();
+      await setHfToken(trimmed.length > 0 ? trimmed : null);
+      setHasToken(trimmed.length > 0);
+      setValue("");
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function clear() {
+    setSaving(true);
+    setError(null);
+    try {
+      await setHfToken(null);
+      setHasToken(false);
+      setValue("");
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="flex flex-col gap-3 rounded-xl border border-border p-3">
+      <div className="flex items-center gap-2">
+        <span className="flex-1 text-sm font-medium">Hugging Face token</span>
+        {hasToken !== null && <Badge variant={hasToken ? "default" : "outline"}>{hasToken ? "set" : "not set"}</Badge>}
+      </div>
+      <p className="text-xs text-muted-foreground">
+        Optional. Needed for gated models and Spaces that require an HF_TOKEN secret.
+      </p>
+
+      {error && (
+        <Alert variant="destructive">
+          <AlertTitle>Could not save token</AlertTitle>
+          <AlertDescription>{error}</AlertDescription>
+        </Alert>
+      )}
+
+      <div className="flex gap-2">
+        <Input
+          type="password"
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          placeholder={hasToken ? "Replace token" : "hf_..."}
+          className="max-w-sm"
+        />
+        <Button onClick={save} disabled={saving || value.trim().length === 0}>
+          {saving ? "Saving..." : "Save"}
+        </Button>
+        {hasToken && (
+          <Button variant="outline" onClick={clear} disabled={saving}>
+            Clear
+          </Button>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function rows(status: RuntimeStatus): Row[] {
   return [
     {
@@ -403,6 +487,8 @@ export function Setup({
       )}
 
       <UpdateCard />
+
+      <TokenCard />
 
       <div className="flex flex-col gap-1.5 rounded-xl border border-border p-3">
         {status ? (

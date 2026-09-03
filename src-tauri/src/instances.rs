@@ -2,6 +2,7 @@
 //! containers, GGUF models inside Ollama. All long work runs in spawned tasks
 //! that publish `instance://update` events.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -154,10 +155,14 @@ fn require_ready(state: &AppState) -> Result<()> {
 
 // ---- Spaces ---------------------------------------------------------------
 
-pub async fn launch_space(app: AppHandle, id: String) -> Result<Instance> {
+pub async fn launch_space(
+    app: AppHandle,
+    id: String,
+    secrets: HashMap<String, String>,
+) -> Result<Instance> {
     let state = app.state::<AppState>();
     require_ready(&state)?;
-    let space = hf::space(&state.http, &id, state.has_gpu()).await?;
+    let space = hf::space(state.inner(), &id).await?;
     if space.compat == hf::Compat::Incompatible {
         return Err(Error::Other(
             space
@@ -166,25 +171,30 @@ pub async fn launch_space(app: AppHandle, id: String) -> Result<Instance> {
         ));
     }
 
-    start_space(app, space, false).await
+    start_space(app, space, false, secrets).await
 }
 
 /// Build the Space's image on this machine, then run it. The path for GPUs the
 /// Hub never built for (AMD, Intel, CPU) and for Spaces without an image.
-pub async fn build_space(app: AppHandle, id: String) -> Result<Instance> {
+pub async fn build_space(
+    app: AppHandle,
+    id: String,
+    secrets: HashMap<String, String>,
+) -> Result<Instance> {
     let state = app.state::<AppState>();
     require_ready(&state)?;
-    let space = hf::space(&state.http, &id, state.has_gpu()).await?;
+    let space = hf::space(state.inner(), &id).await?;
     if matches!(space.sdk.as_deref(), Some("static")) {
         return Err(Error::Other("static Spaces have nothing to build".into()));
     }
-    start_space(app, space, true).await
+    start_space(app, space, true, secrets).await
 }
 
 async fn start_space(
     app: AppHandle,
     space: hf::SpaceSummary,
     local_build: bool,
+    secrets: HashMap<String, String>,
 ) -> Result<Instance> {
     let state = app.state::<AppState>();
     let id = space.id.clone();
@@ -246,7 +256,17 @@ async fn start_space(
             } else {
                 format!("registry.hf.space/{}:latest", slug(&id))
             };
-            run_space(&app2, &inst_id, &image, &space, gpu, !local_build, &cancel).await
+            run_space(
+                &app2,
+                &inst_id,
+                &image,
+                &space,
+                gpu,
+                !local_build,
+                &cancel,
+                &secrets,
+            )
+            .await
         };
         if let Err(e) = launch.await {
             // A Stop mid-launch cancels the flag; the task exits quietly and
@@ -292,6 +312,9 @@ fn cancelled_err() -> Error {
     Error::Other("launch cancelled".into())
 }
 
+// `cancel` (#35/#76) and `secrets` (#57) each added one parameter on top of
+// the existing five; a struct would help but is out of scope for this fix.
+#[allow(clippy::too_many_arguments)]
 async fn run_space(
     app: &AppHandle,
     id: &str,
@@ -300,6 +323,7 @@ async fn run_space(
     gpu: bool,
     pull: bool,
     cancel: &Arc<AtomicBool>,
+    secrets: &HashMap<String, String>,
 ) -> Result<()> {
     let cname = container_name(id);
     let app_port = space.app_port;
@@ -366,6 +390,23 @@ async fn run_space(
     let mem_flag = mem_cap
         .map(|mb| format!("--memory {mb}m --memory-swap {mb}m"))
         .unwrap_or_default();
+    // Gated models need the user's HF token (#60); a Space that reads its own
+    // secrets (#57) gets the values the launch flow collected. Names go into
+    // the shell string bare, so each one is checked before it touches it;
+    // values are hostile input and always go through `wsl::quote`.
+    let mut extra_env = String::new();
+    if let Some(token) = app.state::<AppState>().hf_token() {
+        let q = wsl::quote(&token);
+        extra_env.push_str(&format!(" -e HF_TOKEN={q} -e HUGGING_FACE_HUB_TOKEN={q}"));
+    }
+    for (name, value) in secrets {
+        if !hf::valid_env_name(name) {
+            log::warn!("{id}: skipping secret with an invalid name `{name}`");
+            continue;
+        }
+        let q = wsl::quote(value);
+        extra_env.push_str(&format!(" -e {name}={q}"));
+    }
     let run = format!(
         "docker rm -f {cname} >/dev/null 2>&1; \
          docker run -d --name {cname} {gpu_flag} {publish} {harden} {mem_flag} \
@@ -373,7 +414,7 @@ async fn run_space(
            --label aias.gpu={gpu_label} \
            -v {HF_CACHE_VOLUME}:/home/user/.cache/huggingface \
            -e HF_HOME=/home/user/.cache/huggingface \
-           -e PORT={app_port} -e GRADIO_SERVER_NAME=0.0.0.0 -e GRADIO_SERVER_PORT={app_port} \
+           -e PORT={app_port} -e GRADIO_SERVER_NAME=0.0.0.0 -e GRADIO_SERVER_PORT={app_port}{extra_env} \
            {image} {command}"
     );
     update(app, id, |i| {
@@ -390,7 +431,7 @@ async fn run_space(
         return Err(cancelled_err());
     }
 
-    let base = wait_for_http(app, id, port, &cname, cancel).await?;
+    let base = wait_for_http(app, id, port, &cname, cancel, &space.id).await?;
     update(app, id, |i| {
         i.status = Status::Running;
         i.url = Some(base);
@@ -400,13 +441,15 @@ async fn run_space(
 
 /// Poll the published port on every candidate base until one answers, or the
 /// container dies. Returns whichever base answered so the caller stores the
-/// URL that actually works (#73).
+/// URL that actually works (#73); a gated-repo error in the log tail fails
+/// fast with the repo to request access to instead of a 40-line traceback (#60).
 async fn wait_for_http(
     app: &AppHandle,
     id: &str,
     port: u16,
     cname: &str,
     cancel: &Arc<AtomicBool>,
+    repo: &str,
 ) -> Result<String> {
     let http = reqwest::Client::builder()
         .no_proxy()
@@ -445,6 +488,14 @@ async fn wait_for_http(
                 let mut lines = o.stdout.lines();
                 let running = lines.next().map(str::trim) == Some("true");
                 for l in lines {
+                    // Gated repos die deep in a download traceback; surfacing
+                    // just this fails fast with something the user can act on
+                    // instead of a 40-line stack trace (#60).
+                    if l.contains("GatedRepoError") || l.contains("401 Client Error") {
+                        return Err(Error::Other(format!(
+                            "needs a Hugging Face token with access to {repo}; see https://huggingface.co/{repo}"
+                        )));
+                    }
                     push_log(app, id, l.to_string());
                 }
                 if !running {

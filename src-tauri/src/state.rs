@@ -1,10 +1,12 @@
 use std::collections::{BTreeMap, HashMap};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use tokio::process::Child;
 
 use crate::hardware::Vendor;
+use crate::hf::SpaceSummary;
 use crate::instances::Instance;
 use crate::runtime::RuntimeStatus;
 use crate::services::{ServiceId, ServiceStatus};
@@ -35,6 +37,14 @@ pub struct AppState {
     pub instance_launches: Mutex<HashMap<String, Arc<AtomicBool>>>,
     /// Same as `instance_launches`, keyed by service id (#35).
     pub service_launches: Mutex<HashMap<ServiceId, Arc<AtomicBool>>>,
+    /// Browse Space search cache, keyed by repo id, for the life of the session (#67).
+    pub space_cache: Mutex<HashMap<String, (SpaceSummary, Instant)>>,
+    /// Bumped on every Space search; a spawned detail fetch aborts once this
+    /// no longer matches the generation it started with (#67).
+    pub search_generation: AtomicU64,
+    /// Optional Hugging Face access token; loaded from disk at startup, kept
+    /// here only in memory otherwise (#60).
+    pub hf_token: Mutex<Option<String>>,
 }
 
 impl Default for AppState {
@@ -56,6 +66,9 @@ impl Default for AppState {
             container_memory_cap_mb: Mutex::new(None),
             instance_launches: Mutex::new(HashMap::new()),
             service_launches: Mutex::new(HashMap::new()),
+            space_cache: Mutex::new(HashMap::new()),
+            search_generation: AtomicU64::new(0),
+            hf_token: Mutex::new(None),
         }
     }
 }
@@ -100,6 +113,11 @@ impl AppState {
     /// size it (#64). `None` on a fresh state before the first `runtime::refresh`.
     pub fn container_memory_cap_mb(&self) -> Option<u64> {
         self.container_memory_cap_mb.lock().ok().and_then(|g| *g)
+    }
+
+    /// Hugging Face token, if the user set one (#60).
+    pub fn hf_token(&self) -> Option<String> {
+        self.hf_token.lock().ok().and_then(|t| t.clone())
     }
 
     pub fn is_ready(&self) -> bool {

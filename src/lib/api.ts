@@ -101,6 +101,16 @@ export const onProvisionProgress = (cb: (e: ProvisionEvent) => void): Promise<Un
   listen<ProvisionEvent>("provision://progress", (ev) => cb(ev.payload));
 
 // ---------------------------------------------------------------------------
+// Hugging Face token (#60). Optional; unlocks gated models and Spaces that
+// read HF_TOKEN / HUGGING_FACE_HUB_TOKEN. Stored on disk by the Rust side;
+// the value never round-trips back to the frontend, only whether one is set.
+// ---------------------------------------------------------------------------
+
+export const setHfToken = (token: string | null) => invoke<void>("set_hf_token", { token });
+
+export const hfTokenStatus = () => invoke<boolean>("hf_token_status");
+
+// ---------------------------------------------------------------------------
 // Hugging Face catalog
 // ---------------------------------------------------------------------------
 
@@ -124,6 +134,8 @@ export type SpaceSummary = {
   emoji: string | null;
   compat: Compat;
   compat_reason: string | null;
+  /** env var names the Space's source reads that the user must supply (#57) */
+  secrets: string[];
 };
 
 export type GgufFile = {
@@ -188,7 +200,9 @@ export type Instance = {
   gpu: boolean;
 };
 
-export const launchSpace = (id: string) => invoke<Instance>("launch_space", { id });
+/** `env` supplies values for `SpaceSummary.secrets` (#57); kept in memory only. */
+export const launchSpace = (id: string, env?: Record<string, string>) =>
+  invoke<Instance>("launch_space", { id, env });
 
 /**
  * Clone the Space and build its image here, then run it. For GPUs the Hub never
@@ -199,8 +213,8 @@ export const launchSpace = (id: string) => invoke<Instance>("launch_space", { id
  * (network access, arbitrary `RUN` steps) instead of the generated one; Browse.tsx
  * gates it behind a one-time consent dialog and defaults it off.
  */
-export const buildSpace = (id: string, useRepoDockerfile: boolean) =>
-  invoke<Instance>("build_space", { id, useRepoDockerfile });
+export const buildSpace = (id: string, useRepoDockerfile: boolean, env?: Record<string, string>) =>
+  invoke<Instance>("build_space", { id, useRepoDockerfile, env });
 
 /**
  * `repo` is a Hugging Face GGUF repo (`owner/name`) with `quant` the file's quant tag,
