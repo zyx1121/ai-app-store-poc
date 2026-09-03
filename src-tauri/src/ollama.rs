@@ -21,9 +21,26 @@ pub const PORT: u16 = 11434;
 /// Standalone CLI zips (Ollama's documented path for embedding it in another
 /// application). The base zip carries the CPU and CUDA backends; AMD adds ROCm.
 /// The interactive installer has no working silent mode (ollama/ollama#7969).
-const STANDALONE_BASE: &str = "https://ollama.com/download/";
-const STANDALONE_ZIP: &str = "ollama-windows-amd64.zip";
-const STANDALONE_ROCM_ZIP: &str = "ollama-windows-amd64-rocm.zip";
+///
+/// `ollama.com/download/` always serves the latest build with no fixed URL to
+/// pin and no published checksum; the GitHub release of the same version does
+/// both. `OLLAMA_VERSION` names the tag to bump when Ollama ships a new one.
+const OLLAMA_VERSION: &str = "v0.33.2";
+const STANDALONE_BASE: &str = "https://github.com/ollama/ollama/releases/download/";
+
+/// (asset name, SHA-256). Digests come from the release's own `sha256sum.txt`
+/// (https://github.com/ollama/ollama/releases/download/v0.33.2/sha256sum.txt),
+/// cross-checked here with `shasum -a 256` on the downloaded amd64 zip
+/// (1,460,134,793 bytes, matched) on 2026-09-03; the rocm zip (245,818,363
+/// bytes) was not downloaded in full, only its published digest recorded.
+const STANDALONE_ZIP: (&str, &str) = (
+    "ollama-windows-amd64.zip",
+    "2439cbea65310b1aadf7d8fc41d7faf5d033f920d42e00a476c58bf9bff6950e",
+);
+const STANDALONE_ROCM_ZIP: (&str, &str) = (
+    "ollama-windows-amd64-rocm.zip",
+    "c132d2d4dd3ab58ae39e2251b2335c234f8e861209a65979c12c155c4bab8c40",
+);
 
 /// Where the store keeps its own copy of Ollama for Windows.
 fn managed_dir() -> Option<PathBuf> {
@@ -64,11 +81,11 @@ async fn install_standalone(
     if vendor == Vendor::Amd {
         zips.push(STANDALONE_ROCM_ZIP);
     }
-    for zip in zips {
-        let url = format!("{STANDALONE_BASE}{zip}");
+    for (zip, sha256) in zips {
+        let url = format!("{STANDALONE_BASE}{OLLAMA_VERSION}/{zip}");
         let dest = dir.join(zip);
         log(format!("downloading {url}"));
-        fetch::download(http, &url, &dest, log).await?;
+        fetch::download(http, &url, &dest, Some(sha256), log).await?;
         log(format!("unpacking {zip}"));
         wsl::run(
             "tar.exe",
@@ -81,8 +98,8 @@ async fn install_standalone(
     let exe = dir.join("ollama.exe");
     if !exe.exists() {
         return Err(Error::Other(format!(
-            "{zip} did not contain ollama.exe",
-            zip = STANDALONE_ZIP
+            "{} did not contain ollama.exe",
+            STANDALONE_ZIP.0
         )));
     }
     Ok(exe)
