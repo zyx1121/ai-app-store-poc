@@ -1023,11 +1023,21 @@ pub async fn status(app: &AppHandle, id: ServiceId) -> Result<ServiceStatus> {
 }
 
 /// Fetch (if needed), run, and wait for health. Returns immediately with the
-/// in-progress status; progress arrives on `service://update`.
-pub async fn start(app: AppHandle, id: ServiceId) -> Result<ServiceStatus> {
+/// in-progress status; progress arrives on `service://update`. GPU-heavy
+/// services (ComfyUI) contend for the shared budget, so a start needs a
+/// currently-valid lease from `gpu_plan` (#70); light services (Speaches, CV,
+/// whisper.cpp) are never evicted and start freely.
+pub async fn start(
+    app: AppHandle,
+    id: ServiceId,
+    lease_id: Option<String>,
+) -> Result<ServiceStatus> {
     let state = app.state::<AppState>();
     if !state.is_ready() {
         return Err(Error::NotReady("install the runtime first".into()));
+    }
+    if crate::gpu::service_is_heavy(id) {
+        crate::gpu::require_lease(&state, lease_id.as_deref(), state.memory_budget_mb())?;
     }
     let s = require_spec(id, selector(&state))?;
     let current = status(&app, id).await?;
@@ -1134,6 +1144,9 @@ where
         if health_ok(s.host_port, s.health_path).await {
             update(app, s.id, |st| st.state = ServiceState::Running);
             push_log(app, s.id, "healthy".into());
+            // Starting counts as use: the idle timer (#65) runs from here, not
+            // from whenever the app happens to call `service_touch` next.
+            touch(app, s.id);
             return Ok(());
         }
         if tick % 5 == 4 && !alive().await {
@@ -1595,6 +1608,82 @@ pub fn mark_all_down_by_distro_loss(app: &AppHandle) {
             st.state = ServiceState::Stopped;
             st.error = Some("WSL distro stopped".into());
         });
+    }
+}
+
+// ---- idle-stop --------------------------------------------------------------
+// Light services (never a `gpu_plan` eviction target) get their own idle timer
+// instead (#65).
+
+/// Light services (Speaches, CV) never earn a `gpu_plan` eviction (#65), so
+/// nothing else ever stops them; without an idle timer they run for the rest
+/// of the session even at 387 MiB actual use. Containers only: a native
+/// process (whisper.cpp, portable ComfyUI) is a Windows-side install, not a
+/// disposable container, and #36 already covers process lifetime.
+const IDLE_STOP: [ServiceId; 2] = [ServiceId::Speaches, ServiceId::Cv];
+const IDLE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+
+/// Record that the app itself just used a service: called when a start
+/// becomes healthy, from `cv::detect`, and from the frontend's
+/// `service_touch` for the STT/TTS calls that go straight from the webview to
+/// Speaches/whisper.cpp without a Rust round trip.
+pub fn touch(app: &AppHandle, id: ServiceId) {
+    let state = app.state::<AppState>();
+    let Ok(mut m) = state.service_last_used.lock() else {
+        return;
+    };
+    m.insert(id, std::time::Instant::now());
+}
+
+/// Kill every native Windows child the store still owns: whisper.cpp, and
+/// (on AMD / Intel) portable ComfyUI, plus a native `ollama serve` through
+/// `ollama::kill_native`. Called from the app's exit handler (#36). Containers
+/// keep `--restart unless-stopped` and are untouched here.
+pub async fn stop_all_native(app: &AppHandle) -> Vec<String> {
+    let state = app.state::<AppState>();
+    let children: Vec<(ServiceId, tokio::process::Child)> = state
+        .native_services
+        .lock()
+        .map(|mut m| m.drain().collect())
+        .unwrap_or_default();
+    let mut stopped = Vec::new();
+    for (id, mut child) in children {
+        let _ = child.start_kill();
+        let _ = child.wait().await;
+        stopped.push(format!("{id:?}"));
+    }
+    if crate::ollama::kill_native(&state).await {
+        stopped.push("ollama".into());
+    }
+    stopped
+}
+
+/// Stop light services idle past `IDLE_TIMEOUT`. Reads the cached status only
+/// (no new probe): containers restart in seconds, and the image stays, so this
+/// only costs the next caller a short wait.
+pub async fn stop_idle(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    for id in IDLE_STOP {
+        let Some(st) = get(&state, id) else { continue };
+        if st.state != ServiceState::Running || st.runtime != "container" {
+            continue;
+        }
+        let last_used = state
+            .service_last_used
+            .lock()
+            .ok()
+            .and_then(|m| m.get(&id).copied());
+        let Some(last_used) = last_used else { continue };
+        if last_used.elapsed() < IDLE_TIMEOUT {
+            continue;
+        }
+        log::info!(
+            "service {id:?}: idle {:?}, stopping (image stays)",
+            last_used.elapsed()
+        );
+        if let Err(e) = stop(app.clone(), id).await {
+            log::warn!("service {id:?}: idle stop failed: {e}");
+        }
     }
 }
 

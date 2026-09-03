@@ -129,6 +129,20 @@ function InstanceCard({
           {instance.local_build && <Badge variant="outline">Built locally</Badge>}
           {instance.port && <span>port {instance.port}</span>}
           {instance.url && <span className="truncate">{instance.url}</span>}
+          {instance.status === "pulling" && instance.pull_size_mb !== null && (
+            <span>{(instance.pull_size_mb / 1024).toFixed(1)} GB image</span>
+          )}
+          {instance.status === "pulling" && instance.progress_pct !== null && (
+            <span className="flex min-w-24 flex-1 items-center gap-1.5">
+              <span className="h-1 flex-1 overflow-hidden rounded-full bg-muted">
+                <span
+                  className="block h-full rounded-full bg-primary transition-[width]"
+                  style={{ width: `${instance.progress_pct}%` }}
+                />
+              </span>
+              {instance.progress_pct}%
+            </span>
+          )}
         </div>
         {instance.error && <p className="text-xs text-destructive">{instance.error}</p>}
         <LogTail lines={instance.log_tail} />

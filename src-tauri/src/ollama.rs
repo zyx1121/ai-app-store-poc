@@ -197,6 +197,23 @@ pub fn spawn(state: &AppState, args: &[&str]) -> Result<Child> {
     }
 }
 
+/// Kill a native `ollama serve` this store started, if any (#36). Installed
+/// separately by the user (`OllamaSetup.exe`) it is left alone: only a child
+/// this process holds a handle to is ours to stop.
+pub async fn kill_native(state: &AppState) -> bool {
+    let child = state
+        .native_ollama
+        .lock()
+        .ok()
+        .and_then(|mut guard| guard.take());
+    let Some(mut child) = child else {
+        return false;
+    };
+    let _ = child.start_kill();
+    let _ = child.wait().await;
+    true
+}
+
 /// Non-NVIDIA machines: install Ollama for Windows if missing (standalone zip
 /// into the store's own directory) and keep a headless `ollama serve` running
 /// with CORS open. Idempotent.

@@ -117,6 +117,24 @@ Non-NVIDIA builds pin `torch` to the CPU wheel index. Requirements that only shi
 bitsandbytes, custom kernels) are refused up front with the reason instead of
 failing fifteen minutes in.
 
+## Process lifetime
+
+Decision (issue #36): native Windows processes the store starts (whisper.cpp,
+portable ComfyUI on AMD / Intel, a native `ollama serve` on non-NVIDIA
+machines) are killed when the app exits. Implemented in the Tauri
+`RunEvent::ExitRequested` handler (`lib.rs`), best effort with a 5 s cap;
+`services::stop_all_native` drains `AppState::native_services` and
+`AppState::native_ollama` and logs what it stopped.
+
+Containers are the opposite on purpose: every container runs with
+`--restart unless-stopped`, so Docker (and the WSL2 distro, kept alive
+separately) carries them across an app restart. A native process has no
+supervisor of its own; `--restart` has no Windows-process equivalent, and the
+alternative (leave it running, re-adopt by probing the port on next start) would
+need adoption logic `native_services` does not have and would leave GPU memory
+held by an orphan whenever the user just closes the window. Option 1 (kill on
+exit) is the smaller change and matches "the app owns what it starts natively".
+
 ## Store updates
 
 `tauri-plugin-updater` reads `latest.json` from the repository's latest GitHub

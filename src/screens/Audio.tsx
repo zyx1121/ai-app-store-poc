@@ -19,6 +19,7 @@ import {
   onServiceUpdate,
   serviceModels,
   serviceStatus,
+  serviceTouch,
   startService,
   stopService,
   type Instance,
@@ -188,6 +189,7 @@ export function Audio() {
   const whisperRunning = whisper?.state === "running";
   /** where transcriptions go: the GPU whisper.cpp server when it is up, else Speaches */
   const sttBaseUrl = whisperRunning ? WHISPER_BASE_URL : SPEACHES_BASE_URL;
+  const sttServiceId = whisperRunning ? WHISPER_ID : SERVICE_ID;
 
   useEffect(() => {
     let cancelled = false;
@@ -435,6 +437,9 @@ export function Audio() {
       if (!res.ok) throw new Error(`Transcription failed (${res.status})`);
       const body = (await res.json()) as { text: string };
       setTranscript(body.text);
+      // This call went straight from the webview to the service; tell the
+      // store so its idle-stop timer resets (#65).
+      void serviceTouch(sttServiceId);
     } catch (err) {
       setRecordError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -465,6 +470,7 @@ export function Audio() {
       });
       if (!res.ok) throw new Error(`Speech synthesis failed (${res.status})`);
       const bytes = await res.blob();
+      void serviceTouch(SERVICE_ID);
       if (audioUrlRef.current) URL.revokeObjectURL(audioUrlRef.current);
       const url = URL.createObjectURL(bytes);
       audioUrlRef.current = url;

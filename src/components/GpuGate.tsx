@@ -17,7 +17,7 @@ export function residentLabel(r: Resident): string {
   return r.vram_mb === null ? "size unknown" : gb(r.vram_mb);
 }
 
-type Pending = { plan: GpuPlan; name: string; resolve: (proceed: boolean) => void };
+type Pending = { plan: GpuPlan; name: string; resolve: (result: GateResult) => void };
 
 /** Join residents into "A, B, and C" for a sentence naming who gets stopped. */
 function joinNames(items: string[]): string {
@@ -25,6 +25,14 @@ function joinNames(items: string[]): string {
   if (items.length === 2) return `${items[0]} and ${items[1]}`;
   return `${items.slice(0, -1).join(", ")}, and ${items[items.length - 1]}`;
 }
+
+/**
+ * `proceed`: whether the caller should launch. `leaseId`: the plan's lease
+ * (from `GpuPlan.lease_id`), to pass through to the launch call so the store
+ * can hold the same lock from plan to launch (#70); `null` on a CPU machine,
+ * where nothing was scheduled and no lease was issued.
+ */
+export type GateResult = { proceed: boolean; leaseId: string | null };
 
 /**
  * Ask the store what a launch would evict from GPU memory; when the answer is
@@ -38,10 +46,10 @@ export function useGpuGate() {
   const [error, setError] = useState<string | null>(null);
   const pendingRef = useRef<Pending | null>(null);
 
-  const gate = useCallback(async (request: GpuRequest, name: string): Promise<boolean> => {
+  const gate = useCallback(async (request: GpuRequest, name: string): Promise<GateResult> => {
     const plan = await gpuPlan(request);
-    if (plan.evict.length === 0) return true;
-    return new Promise<boolean>((resolve) => {
+    if (plan.evict.length === 0) return { proceed: true, leaseId: plan.lease_id };
+    return new Promise<GateResult>((resolve) => {
       const p = { plan, name, resolve };
       pendingRef.current = p;
       setError(null);
@@ -49,11 +57,11 @@ export function useGpuGate() {
     });
   }, []);
 
-  function finish(proceed: boolean) {
+  function finish(result: GateResult) {
     const p = pendingRef.current;
     pendingRef.current = null;
     setPending(null);
-    p?.resolve(proceed);
+    p?.resolve(result);
   }
 
   async function handleUnload() {
@@ -63,7 +71,7 @@ export function useGpuGate() {
     setError(null);
     try {
       for (const r of p.plan.evict) await gpuRelease(r);
-      finish(true);
+      finish({ proceed: true, leaseId: p.plan.lease_id });
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -88,7 +96,7 @@ export function useGpuGate() {
     <Dialog
       open={pending !== null}
       onOpenChange={(open) => {
-        if (!open && !releasing) finish(false);
+        if (!open && !releasing) finish({ proceed: false, leaseId: null });
       }}
     >
       <DialogContent>
@@ -107,7 +115,11 @@ export function useGpuGate() {
         </ul>
         {error && <p className="text-xs text-destructive">{error}</p>}
         <DialogFooter>
-          <Button variant="outline" disabled={releasing} onClick={() => finish(false)}>
+          <Button
+            variant="outline"
+            disabled={releasing}
+            onClick={() => finish({ proceed: false, leaseId: null })}
+          >
             Cancel
           </Button>
           <Button disabled={releasing} onClick={handleUnload}>

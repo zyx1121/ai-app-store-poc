@@ -203,12 +203,13 @@ export function Browse({ onLaunched }: { onLaunched: () => void }) {
     setLaunchError(null);
     setLaunchingId(space.id);
     try {
-      if (
-        spaceWantsGpu(space) &&
-        !(await gate({ kind: "space", id: space.id }, space.title ?? space.name))
-      )
-        return;
-      await launchSpace(space.id, env);
+      let leaseId: string | null = null;
+      if (spaceWantsGpu(space)) {
+        const result = await gate({ kind: "space", id: space.id }, space.title ?? space.name);
+        if (!result.proceed) return;
+        leaseId = result.leaseId;
+      }
+      await launchSpace(space.id, env, leaseId);
       onLaunched();
     } catch (e) {
       setLaunchError(String(e));
@@ -252,14 +253,15 @@ export function Browse({ onLaunched }: { onLaunched: () => void }) {
     setLaunchError(null);
     setBuildingId(space.id);
     try {
-      if (
-        spaceWantsGpu(space) &&
-        !(await gate({ kind: "space", id: space.id }, space.title ?? space.name))
-      )
-        return;
+      let leaseId: string | null = null;
+      if (spaceWantsGpu(space)) {
+        const result = await gate({ kind: "space", id: space.id }, space.title ?? space.name);
+        if (!result.proceed) return;
+        leaseId = result.leaseId;
+      }
       const { proceed, useRepoDockerfile } = await confirmBuildLocally(space);
       if (!proceed) return;
-      await buildSpace(space.id, useRepoDockerfile, env);
+      await buildSpace(space.id, useRepoDockerfile, env, leaseId);
       onLaunched();
     } catch (e) {
       setLaunchError(String(e));
@@ -305,11 +307,12 @@ export function Browse({ onLaunched }: { onLaunched: () => void }) {
     setLaunchError(null);
     try {
       const tag = `hf.co/${dialogModel.id}:${selectedFile.quant}`;
-      if (
-        !(await gate({ kind: "model", tag, size_bytes: selectedFile.size_bytes }, dialogModel.name))
-      )
-        return;
-      await launchModel(dialogModel.id, selectedFile.quant);
+      const result = await gate(
+        { kind: "model", tag, size_bytes: selectedFile.size_bytes },
+        dialogModel.name,
+      );
+      if (!result.proceed) return;
+      await launchModel(dialogModel.id, selectedFile.quant, result.leaseId);
       setDialogModel(null);
       onLaunched();
     } catch (e) {

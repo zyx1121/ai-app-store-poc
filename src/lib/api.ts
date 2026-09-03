@@ -198,11 +198,20 @@ export type Instance = {
   local_build: boolean;
   /** container was started with the GPU; CPU-tier Spaces run without it */
   gpu: boolean;
+  /** size of the image being (or about to be) pulled, from the registry manifest; null when unknown */
+  pull_size_mb: number | null;
+  /** aggregate `docker pull` progress across layers, 0..100; null outside `pulling` */
+  progress_pct: number | null;
 };
 
-/** `env` supplies values for `SpaceSummary.secrets` (#57); kept in memory only. */
-export const launchSpace = (id: string, env?: Record<string, string>) =>
-  invoke<Instance>("launch_space", { id, env });
+/**
+ * `env` supplies values for `SpaceSummary.secrets` (#57); kept in memory only.
+ * `leaseId` comes from `GpuPlan.lease_id` (via `useGpuGate`'s `gate()`) when the
+ * launch was gated; required whenever this machine has a GPU budget to schedule
+ * against, so two launches cannot double-book VRAM (#70).
+ */
+export const launchSpace = (id: string, env?: Record<string, string>, leaseId?: string | null) =>
+  invoke<Instance>("launch_space", { id, env, leaseId });
 
 /**
  * Clone the Space and build its image here, then run it. For GPUs the Hub never
@@ -213,15 +222,19 @@ export const launchSpace = (id: string, env?: Record<string, string>) =>
  * (network access, arbitrary `RUN` steps) instead of the generated one; Browse.tsx
  * gates it behind a one-time consent dialog and defaults it off.
  */
-export const buildSpace = (id: string, useRepoDockerfile: boolean, env?: Record<string, string>) =>
-  invoke<Instance>("build_space", { id, useRepoDockerfile, env });
+export const buildSpace = (
+  id: string,
+  useRepoDockerfile: boolean,
+  env?: Record<string, string>,
+  leaseId?: string | null,
+) => invoke<Instance>("build_space", { id, useRepoDockerfile, env, leaseId });
 
 /**
  * `repo` is a Hugging Face GGUF repo (`owner/name`) with `quant` the file's quant tag,
  * or a bare Ollama library name (`qwen2.5vl`) with `quant` the library tag (`7b`).
  */
-export const launchModel = (repo: string, quant: string) =>
-  invoke<Instance>("launch_model", { repo, quant });
+export const launchModel = (repo: string, quant: string, leaseId?: string | null) =>
+  invoke<Instance>("launch_model", { repo, quant, leaseId });
 
 export const listInstances = () => invoke<Instance[]>("list_instances");
 
@@ -272,10 +285,22 @@ export type ServiceStatus = {
 
 export const serviceStatus = (id: ServiceId) => invoke<ServiceStatus>("service_status", { id });
 
-/** Pulls the image if needed, starts the container, waits for health. Progress on `service://update`. */
-export const startService = (id: ServiceId) => invoke<ServiceStatus>("start_service", { id });
+/**
+ * Pulls the image if needed, starts the container, waits for health. Progress on
+ * `service://update`. `leaseId` (from `gate()`) is required for ComfyUI, the one
+ * service heavy enough to contend for the shared GPU budget (#70).
+ */
+export const startService = (id: ServiceId, leaseId?: string | null) =>
+  invoke<ServiceStatus>("start_service", { id, leaseId });
 
 export const stopService = (id: ServiceId) => invoke<void>("stop_service", { id });
+
+/**
+ * Tell the store this service was just used, for services whose calls go
+ * straight from the webview (Speaches STT/TTS, whisper.cpp): the idle-stop
+ * timer (15 min) resets from here instead of firing under an active session.
+ */
+export const serviceTouch = (id: ServiceId) => invoke<void>("service_touch", { id });
 
 export const onServiceUpdate = (cb: (s: ServiceStatus) => void): Promise<UnlistenFn> =>
   listen<ServiceStatus>("service://update", (ev) => cb(ev.payload));
@@ -364,6 +389,12 @@ export type GpuPlan = {
   /** unload these, in order, before the launch */
   evict: Resident[];
   fits_without_eviction: boolean;
+  /**
+   * Held for 120s from this plan through the matching launch; pass it to
+   * `launchSpace` / `launchModel` / `startService`. `null` on a machine with no
+   * GPU budget, where nothing needs a lock (#70).
+   */
+  lease_id: string | null;
 };
 
 export const gpuMemory = () => invoke<GpuMemory>("gpu_memory");
