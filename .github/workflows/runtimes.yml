@@ -65,7 +65,7 @@ jobs:
           # sha256sum format (lowercase hex, two spaces, file name) so fetch.rs's
           # SHA256SUMS parser and any local `shasum -a 256 -c` both read it.
           $hash = (Get-FileHash whisper-server-vulkan-x64.zip -Algorithm SHA256).Hash.ToLower()
-          Set-Content -NoNewline SHA256SUMS "$hash  whisper-server-vulkan-x64.zip`n"
+          Set-Content -Path SHA256SUMS -Value "$hash  whisper-server-vulkan-x64.zip`n" -NoNewline -Encoding ascii
           Get-Content SHA256SUMS
 
       - uses: actions/upload-artifact@v4
