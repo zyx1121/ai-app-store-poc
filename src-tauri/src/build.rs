@@ -9,7 +9,7 @@ use crate::hf::SpaceSummary;
 use crate::wsl;
 
 /// Directory inside the distro where Space sources are cloned.
-const BUILD_ROOT: &str = "/var/lib/aias/build";
+pub const BUILD_ROOT: &str = "/var/lib/aias/build";
 
 /// Packages that only ship CUDA builds; a non-NVIDIA build with these will fail,
 /// so say so before spending fifteen minutes on it.

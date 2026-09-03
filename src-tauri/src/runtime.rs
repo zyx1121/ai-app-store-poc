@@ -321,6 +321,20 @@ pub async fn provision(app: &AppHandle, state: &AppState) -> Result<RuntimeStatu
         emit(app, "wsl", "ok", "WSL2 ready");
     }
 
+    // Global to every WSL distro; only touched when absent, so a reboot into
+    // firmware setup and a second `provision` call never clobbers the user's
+    // own tuning. Best-effort: a failure here does not block provisioning.
+    match write_wslconfig(s.hardware.total_ram_mb) {
+        WslConfigOutcome::Written(path) => emit(
+            app,
+            "memory",
+            "ok",
+            format!("wrote {path} (WSL2 memory ceiling)"),
+        ),
+        WslConfigOutcome::Kept => emit(app, "memory", "ok", "existing .wslconfig kept"),
+        WslConfigOutcome::Error(e) => emit(app, "memory", "error", e),
+    }
+
     if !s.distro_present {
         emit(
             app,
@@ -458,4 +472,84 @@ pub async fn provision(app: &AppHandle, state: &AppState) -> Result<RuntimeStatu
         emit(app, "done", "error", format!("still not ready: {s:?}"));
     }
     Ok(s)
+}
+
+// ---- Resource limits (#64) -------------------------------------------------
+//
+// WSL2's VM keeps page cache and returns it slowly (or not at all) without a
+// memory ceiling of its own: `vmmemWSL` can hold most of the host's RAM after
+// a day of image pulls. `write_wslconfig` gives the whole VM one ceiling;
+// Space containers additionally get a per-container `--memory` cap sized off
+// the same figure (`state::container_memory_cap_mb`, set from `wsl_cap_mb`
+// below at startup and read by `instances::run_space`).
+
+const MIN_WSL_MEMORY_GB: u64 = 6;
+/// Fallback when `total_ram_mb` could not be probed: conservative, but never
+/// leaves the VM uncapped.
+const DEFAULT_TOTAL_RAM_MB: u64 = 16 * 1024;
+
+/// The WSL2 VM's memory ceiling: half of physical RAM, floored at 6 GB.
+pub fn wsl_cap_mb(total_ram_mb: Option<u64>) -> u64 {
+    let total = total_ram_mb.unwrap_or(DEFAULT_TOTAL_RAM_MB);
+    std::cmp::max(MIN_WSL_MEMORY_GB * 1024, total / 2)
+}
+
+/// `--memory` cap for a single Space container: 75% of the VM's own ceiling,
+/// so one container cannot alone push the VM to its limit.
+pub fn container_memory_cap_mb(total_ram_mb: Option<u64>) -> u64 {
+    wsl_cap_mb(total_ram_mb) * 3 / 4
+}
+
+#[derive(Debug, Clone)]
+pub enum WslConfigOutcome {
+    /// wrote a new file at this path
+    Written(String),
+    /// an existing `.wslconfig` was left alone
+    Kept,
+    /// could not determine `%USERPROFILE%` or write the file
+    Error(String),
+}
+
+/// Write `%USERPROFILE%\.wslconfig` with a memory ceiling for the whole WSL2
+/// VM, but only if the file does not exist yet: it is global to every distro
+/// on the machine, so an existing file is the user's own tuning and is never
+/// touched.
+pub fn write_wslconfig(total_ram_mb: Option<u64>) -> WslConfigOutcome {
+    let profile = match std::env::var("USERPROFILE") {
+        Ok(p) => p,
+        Err(_) => return WslConfigOutcome::Error("%USERPROFILE% is not set".into()),
+    };
+    let path = std::path::PathBuf::from(profile).join(".wslconfig");
+    if path.exists() {
+        log::info!("existing .wslconfig kept");
+        return WslConfigOutcome::Kept;
+    }
+    let cap_gb = wsl_cap_mb(total_ram_mb) / 1024;
+    let contents =
+        format!("[wsl2]\nmemory={cap_gb}GB\nautoMemoryReclaim=gradual\nsparseVhd=true\n");
+    match std::fs::write(&path, contents) {
+        Ok(()) => WslConfigOutcome::Written(path.display().to_string()),
+        Err(e) => WslConfigOutcome::Error(e.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod resource_limit_tests {
+    use super::*;
+
+    #[test]
+    fn wsl_cap_is_half_of_ram_floored_at_six_gb() {
+        assert_eq!(wsl_cap_mb(Some(32 * 1024)), 16 * 1024);
+        assert_eq!(
+            wsl_cap_mb(Some(8 * 1024)),
+            6 * 1024,
+            "half of 8GB is below the floor"
+        );
+        assert_eq!(wsl_cap_mb(None), DEFAULT_TOTAL_RAM_MB / 2);
+    }
+
+    #[test]
+    fn container_cap_is_three_quarters_of_the_wsl_cap() {
+        assert_eq!(container_memory_cap_mb(Some(32 * 1024)), 12 * 1024);
+    }
 }

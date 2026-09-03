@@ -378,6 +378,53 @@ export const WHISPER_BASE_URL = `http://localhost:${WHISPER_PORT}/v1`;
 export const OLLAMA_BASE_URL = "http://localhost:11434/v1";
 
 // ---------------------------------------------------------------------------
+// Storage: Docker images, build cache, the HF cache volume, our local build
+// directory, and the WSL virtual disk on Windows (#63).
+// ---------------------------------------------------------------------------
+
+export type StorageUsage = {
+  images_total_mb: number;
+  images_reclaimable_mb: number;
+  build_cache_mb: number;
+  build_cache_reclaimable_mb: number;
+  hf_cache_mb: number;
+  build_dir_mb: number;
+  /** size of the WSL virtual disk on Windows; `null` when it cannot be located */
+  vhdx_mb: number | null;
+};
+
+export type StorageCleanupOptions = {
+  dangling_images: boolean;
+  build_cache: boolean;
+  /** `registry.hf.space/*` / `aias-local/*` images no running or starting instance uses */
+  unused_space_images: boolean;
+  /** trim HF cache entries older than this many days; omit to skip the step */
+  hf_cache_older_than_days?: number;
+  /** shrinks the WSL virtual disk; stops the distro (Docker, Ollama, every instance) while it runs */
+  compact_vhd: boolean;
+};
+
+export type StorageCleanupResult = {
+  freed_mb: number;
+  usage: StorageUsage;
+};
+
+export type StorageProgressEvent = {
+  step: string;
+  status: "start" | "ok" | "error" | "log";
+  message: string;
+};
+
+export const storageUsage = () => invoke<StorageUsage>("storage_usage");
+
+/** Long-running. Progress arrives on `storage://progress`; resolves with the freed total and fresh usage. */
+export const storageCleanup = (options: StorageCleanupOptions) =>
+  invoke<StorageCleanupResult>("storage_cleanup", { options });
+
+export const onStorageProgress = (cb: (e: StorageProgressEvent) => void): Promise<UnlistenFn> =>
+  listen<StorageProgressEvent>("storage://progress", (ev) => cb(ev.payload));
+
+// ---------------------------------------------------------------------------
 // Store self-update (tauri-plugin-updater). The endpoint is the repository's
 // latest GitHub Release; the MSI is verified against the public key in
 // tauri.conf.json before it is installed.

@@ -12,6 +12,7 @@ use crate::error::{Error, Result};
 use crate::hf;
 use crate::ollama;
 use crate::state::AppState;
+use crate::storage;
 use crate::wsl::{self, slug};
 
 const UPDATE_EVENT: &str = "instance://update";
@@ -314,9 +315,15 @@ async fn run_space(
     let repo = &space.id;
     let publish = wsl::publish(port, app_port);
     let harden = wsl::HARDEN;
+    // Caps a runaway Space at a share of the WSL2 VM's own memory ceiling
+    // (#64); `None` before the first runtime probe leaves the container uncapped.
+    let mem_cap = app.state::<AppState>().container_memory_cap_mb();
+    let mem_flag = mem_cap
+        .map(|mb| format!("--memory {mb}m --memory-swap {mb}m"))
+        .unwrap_or_default();
     let run = format!(
         "docker rm -f {cname} >/dev/null 2>&1; \
-         docker run -d --name {cname} {gpu_flag} {publish} {harden} \
+         docker run -d --name {cname} {gpu_flag} {publish} {harden} {mem_flag} \
            --label aias.kind=space --label aias.repo='{repo}' --label aias.port={port} \
            --label aias.gpu={gpu_label} \
            -v {HF_CACHE_VOLUME}:/home/user/.cache/huggingface \
@@ -564,6 +571,8 @@ pub async fn remove(app: AppHandle, id: String) -> Result<()> {
         if let Ok(mut m) = state.instances.lock() {
             m.remove(&id);
         }
+        // Only when nothing else references it (#63); Stopped instances never do.
+        storage::maybe_remove_image(&state, &inst).await;
         let mut gone = inst;
         gone.status = Status::Stopped;
         let _ = app.emit(UPDATE_EVENT, gone);

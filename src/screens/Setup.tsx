@@ -18,6 +18,7 @@ import { Button } from "@/components/ui/button";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
+import { StorageCard } from "@/components/StorageCard";
 import { Cpu, CircleCheck, CircleX, Microchip, Minus, TriangleAlert } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -468,6 +469,8 @@ export function Setup({
           )}
         </div>
       )}
+
+      <StorageCard />
     </div>
   );
 }
