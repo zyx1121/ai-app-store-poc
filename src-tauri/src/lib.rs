@@ -64,8 +64,9 @@ async fn launch_space(
     app: AppHandle,
     id: String,
     env: Option<HashMap<String, String>>,
+    lease_id: Option<String>,
 ) -> CmdResult<instances::Instance> {
-    cmd(instances::launch_space(app, id, env.unwrap_or_default()).await)
+    cmd(instances::launch_space(app, id, env.unwrap_or_default(), lease_id).await)
 }
 
 #[tauri::command]
@@ -74,11 +75,12 @@ async fn build_space(
     id: String,
     use_repo_dockerfile: bool,
     env: Option<HashMap<String, String>>,
+    lease_id: Option<String>,
 ) -> CmdResult<instances::Instance> {
     // Set before starting the build; `build::build_space` (called deep inside
     // `instances::build_space`) reads it instead of taking it as an argument.
     build::USE_REPO_DOCKERFILE.store(use_repo_dockerfile, std::sync::atomic::Ordering::Relaxed);
-    cmd(instances::build_space(app, id, env.unwrap_or_default()).await)
+    cmd(instances::build_space(app, id, env.unwrap_or_default(), lease_id).await)
 }
 
 /// Optional Hugging Face token (#60): `None` clears it. Never returns the
@@ -111,8 +113,15 @@ async fn launch_model(
     app: AppHandle,
     repo: String,
     quant: String,
+    lease_id: Option<String>,
 ) -> CmdResult<instances::Instance> {
-    cmd(instances::launch_model(app, repo, quant).await)
+    cmd(instances::launch_model(app, repo, quant, lease_id).await)
+}
+
+/// Size of a Space's registry image, in MB, without pulling it (#55).
+#[tauri::command]
+async fn space_image_size(app: AppHandle, id: String) -> Option<u64> {
+    instances::space_image_size(&app, &id).await
 }
 
 #[tauri::command]
@@ -143,8 +152,17 @@ async fn service_status(
 async fn start_service(
     app: AppHandle,
     id: services::ServiceId,
+    lease_id: Option<String>,
 ) -> CmdResult<services::ServiceStatus> {
-    cmd(services::start(app, id).await)
+    cmd(services::start(app, id, lease_id).await)
+}
+
+/// Record that the app just used a service whose calls go straight from the
+/// webview to the service (Speaches STT/TTS, whisper.cpp), so the idle-stop
+/// timer does not fire under it (#65).
+#[tauri::command]
+fn service_touch(app: AppHandle, id: services::ServiceId) {
+    services::touch(&app, id);
 }
 
 #[tauri::command]
@@ -256,9 +274,33 @@ fn open_url(app: AppHandle, url: String) -> CmdResult<()> {
         .map_err(|e| e.to_string())
 }
 
+/// Kill the native Windows children the store still owns (whisper.cpp,
+/// portable ComfyUI, native Ollama), best effort with a 5 s cap. Containers
+/// are untouched: `--restart unless-stopped` is on purpose, so Docker state
+/// survives an app restart (see docs/ARCHITECTURE.md "Process lifetime", #36).
+fn stop_native_on_exit(app: &AppHandle) {
+    let handle = app.clone();
+    tauri::async_runtime::block_on(async move {
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            services::stop_all_native(&handle),
+        )
+        .await
+        {
+            Ok(stopped) if !stopped.is_empty() => {
+                log::info!("app exit: stopped native services {stopped:?}");
+            }
+            Ok(_) => {}
+            Err(_) => log::warn!(
+                "app exit: stopping native services took over 5s; some may be left running"
+            ),
+        }
+    });
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
@@ -292,6 +334,17 @@ pub fn run() {
             // Re-verify liveness (a dead container, a stopped distro) every
             // 10 s for as long as the app runs (#68, #69).
             reconcile::spawn(app.handle().clone());
+            // Idle platform services (Speaches, CV) stop themselves after 15
+            // minutes without a request; images stay, so the next start is a
+            // pull-free restart (#65).
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
+                loop {
+                    tick.tick().await;
+                    services::stop_idle(&handle).await;
+                }
+            });
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -313,6 +366,7 @@ pub fn run() {
             launch_space,
             build_space,
             launch_model,
+            space_image_size,
             list_instances,
             stop_instance,
             remove_instance,
@@ -321,6 +375,7 @@ pub fn run() {
             stop_service,
             service_models,
             install_service_model,
+            service_touch,
             cv_detect,
             gpu_memory,
             gpu_plan,
@@ -332,6 +387,12 @@ pub fn run() {
             set_hf_token,
             hf_token_status,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application");
+
+    app.run(|app_handle, event| {
+        if let tauri::RunEvent::ExitRequested { .. } = event {
+            stop_native_on_exit(app_handle);
+        }
+    });
 }
