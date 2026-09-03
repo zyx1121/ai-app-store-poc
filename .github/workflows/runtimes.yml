@@ -2,8 +2,13 @@ name: Runtimes
 
 # Native runtimes the store downloads on machines whose GPU WSL2 cannot see.
 # whisper.cpp publishes no Vulkan build for Windows, so this job builds the
-# server with GGML_VULKAN and uploads it to the rolling `runtimes` release; the
-# `WHISPER_VULKAN` spec in services.rs points at that asset.
+# server with GGML_VULKAN and publishes it, with a SHA256SUMS beside it, to a
+# fresh `runtimes-vN` release; the `WHISPER_VULKAN` spec in services.rs points
+# at one specific tag and `fetch::release_checksum` checks the zip against
+# that release's SHA256SUMS (there is no compile-time digest to embed for a
+# binary this workflow builds itself). Each tag is created once and never
+# republished, so a compromised token or a bad workflow_dispatch input cannot
+# silently swap the file every installed client already trusts (#37).
 
 on:
   workflow_dispatch:
@@ -57,19 +62,41 @@ jobs:
           Set-Content out\SOURCE.txt "whisper.cpp ${env:WHISPER_REF}, built with GGML_VULKAN=ON (Vulkan SDK ${env:VULKAN_VERSION}) by ai-app-store-poc runtimes.yml"
           Compress-Archive -Path out\* -DestinationPath whisper-server-vulkan-x64.zip
           Get-Item whisper-server-vulkan-x64.zip | Select-Object Name, Length
+          # sha256sum format (lowercase hex, two spaces, file name) so fetch.rs's
+          # SHA256SUMS parser and any local `shasum -a 256 -c` both read it.
+          $hash = (Get-FileHash whisper-server-vulkan-x64.zip -Algorithm SHA256).Hash.ToLower()
+          Set-Content -NoNewline SHA256SUMS "$hash  whisper-server-vulkan-x64.zip`n"
+          Get-Content SHA256SUMS
 
       - uses: actions/upload-artifact@v4
         with:
           name: whisper-server-vulkan-x64
-          path: whisper-server-vulkan-x64.zip
+          path: |
+            whisper-server-vulkan-x64.zip
+            SHA256SUMS
 
-      # Rolling release: one fixed tag so the store's download URL never changes.
-      - name: Publish to the `runtimes` release
+      # Each run cuts a new `runtimes-vN` tag rather than overwriting a rolling
+      # one, so a compromised token or a bad workflow_dispatch input cannot
+      # swap the file every client already trusts. WHISPER_VULKAN in
+      # services.rs is pinned to one specific tag; bump it by hand after
+      # checking a new release's SHA256SUMS.
+      - name: Determine the next runtimes tag
+        id: tag
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release view runtimes --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
-            gh release create runtimes --repo "$GITHUB_REPOSITORY" --prerelease \
-              --title "Native runtimes" --notes "Rolling builds of native runtimes the store downloads (see .github/workflows/runtimes.yml)."
-          gh release upload runtimes whisper-server-vulkan-x64.zip --repo "$GITHUB_REPOSITORY" --clobber
+          latest=$(gh release list --repo "$GITHUB_REPOSITORY" --json tagName -q '.[].tagName' \
+            | grep -E '^runtimes-v[0-9]+$' | sed 's/runtimes-v//' | sort -n | tail -1)
+          next=$(( ${latest:-0} + 1 ))
+          echo "tag=runtimes-v$next" >> "$GITHUB_OUTPUT"
+
+      - name: Publish the release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ steps.tag.outputs.tag }}" --repo "$GITHUB_REPOSITORY" --prerelease \
+            --title "Native runtimes (${{ steps.tag.outputs.tag }})" \
+            --notes "whisper.cpp ${{ env.WHISPER_REF }} built with GGML_VULKAN=ON. See .github/workflows/runtimes.yml." \
+            whisper-server-vulkan-x64.zip SHA256SUMS
