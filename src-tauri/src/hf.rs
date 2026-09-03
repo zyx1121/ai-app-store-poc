@@ -416,14 +416,25 @@ pub async fn search_models(
     }
     let token = state.hf_token();
     let raw: Vec<RawModel> = get(&state.http, &url, token.as_deref()).await?;
-    Ok(raw.into_iter().map(summarize_model).collect())
+    // A diffusion or embedding GGUF (sd-turbo) pulls fine and then 500s on
+    // /api/generate; there is nothing the user can do with it here, so it is
+    // dropped rather than shown as Incompatible.
+    Ok(raw
+        .into_iter()
+        .map(summarize_model)
+        .filter(|m| m.compat != Compat::Incompatible)
+        .collect())
 }
 
 fn summarize_model(m: RawModel) -> ModelSummary {
     let (author, name) = split_repo(&m.id);
     let author = m.author.unwrap_or(author);
     let (compat, reason) = match m.pipeline_tag.as_deref() {
-        None | Some("text-generation") => (Compat::Ready, None),
+        Some("text-generation") => (Compat::Ready, None),
+        None => (
+            Compat::Maybe,
+            Some("No pipeline tag on the Hub; may not be a chat model".into()),
+        ),
         Some("image-text-to-text") => (
             Compat::Maybe,
             Some("Vision model; needs a matching mmproj file, chat UI is text only".into()),
@@ -464,26 +475,37 @@ pub async fn model_files(state: &AppState, repo: &str) -> Result<Vec<GgufFile>> 
     let mut files: Vec<GgufFile> = m
         .siblings
         .into_iter()
-        .filter(|s| s.rfilename.to_ascii_lowercase().ends_with(".gguf"))
-        .filter(|s| !shard_re.is_match(&s.rfilename))
-        .filter(|s| !s.rfilename.to_ascii_lowercase().contains("mmproj"))
-        .map(|s| {
+        .filter(|s| pullable_gguf(&s.rfilename, &shard_re))
+        .filter_map(|s| {
+            // Ollama names the file by its quant tag; a file it cannot name it
+            // cannot pull, so drop it instead of offering `:UNKNOWN`.
             let quant = quant_re
                 .captures(&s.rfilename)
                 .and_then(|c| c.get(1))
-                .map(|m| m.as_str().to_ascii_uppercase())
-                .unwrap_or_else(|| "UNKNOWN".into());
+                .map(|m| m.as_str().to_ascii_uppercase())?;
             let size = s.size.unwrap_or(0);
-            GgufFile {
+            Some(GgufFile {
                 fits: fit(size, budget_mb),
                 filename: s.rfilename,
                 quant,
                 size_bytes: size,
-            }
+            })
         })
         .collect();
     files.sort_by_key(|f| f.size_bytes);
     Ok(files)
+}
+
+/// Files `ollama pull hf.co/<repo>:<quant>` can actually fetch: a single GGUF
+/// at the repo root. Ollama does not look into subdirectories (unsloth keeps
+/// its IQ quants in folders, which fails with "file does not exist"), cannot
+/// join `-00001-of-0000N` shards, and mmproj files are not models.
+fn pullable_gguf(name: &str, shard_re: &Regex) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.ends_with(".gguf")
+        && !name.contains('/')
+        && !shard_re.is_match(name)
+        && !lower.contains("mmproj")
 }
 
 /// Bytes a GGUF of `size` occupies once loaded: the weights, an eighth for
@@ -738,6 +760,16 @@ mod tests {
             space_compat(Some("gradio"), Some("SLEEPING"), Some("cpu-basic"), true).0,
             Compat::Ready
         );
+    }
+
+    #[test]
+    fn only_root_single_file_ggufs_are_pullable() {
+        let shard_re = Regex::new(r"-\d{5}-of-\d{5}\.gguf$").unwrap();
+        assert!(pullable_gguf("Qwen3-8B-Q4_K_M.gguf", &shard_re));
+        assert!(!pullable_gguf("IQ2_XXS/Qwen3.5-9B-IQ2_XXS.gguf", &shard_re));
+        assert!(!pullable_gguf("model-Q8_0-00001-of-00003.gguf", &shard_re));
+        assert!(!pullable_gguf("mmproj-F16.gguf", &shard_re));
+        assert!(!pullable_gguf("README.md", &shard_re));
     }
 
     #[test]
