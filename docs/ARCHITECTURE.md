@@ -143,3 +143,18 @@ mirror `latest.json` and the MSI to a public HTTPS host.
   and GitHub go through the same CI so devices only ever pull.
 - **Base UIs**: voice (STT/TTS) and camera/video (CV) next to Chat, chosen by
   the model's `pipeline_tag`.
+
+## Resource limits
+
+WSL2's VM keeps page cache and returns it slowly, so an unbounded install can
+leave `vmmemWSL` holding most of the host's RAM (#64). Provisioning writes
+`%USERPROFILE%\.wslconfig` with a memory ceiling (half of physical RAM,
+floored at 6 GB, `autoMemoryReclaim=gradual`, `sparseVhd=true`) the first time
+it runs, but never touches an existing file: the setting is global to every
+WSL distro on the machine, so an existing file is the user's own tuning.
+Space containers additionally get a `--memory` / `--memory-swap` cap at 75% of
+that ceiling, computed once at startup and stored on `AppState`, so one
+runaway container cannot alone push the VM to its limit; platform services
+keep no cap. Disk usage (Docker images, build cache, the HF cache volume, the
+WSL virtual disk) is surfaced and reclaimable from Setup's storage card
+(`storage.rs`, #63).
