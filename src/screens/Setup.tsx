@@ -109,7 +109,9 @@ function HardwareCard({
             <span className="text-muted-foreground">Driver</span>
             {hardware.gpus.map((gpu) => (
               <Fragment key={gpu.name}>
-                <span className="truncate">{gpu.name}</span>
+                <span className="break-words" title={gpu.name}>
+                  {gpu.name}
+                </span>
                 <span>{gpuMemory(gpu)}</span>
                 <span>{gpu.integrated && <Badge variant="outline">integrated</Badge>}</span>
                 <span className="text-muted-foreground">{gpu.driver ?? "-"}</span>
@@ -474,7 +476,7 @@ export function Setup({
   }
 
   return (
-    <div className="mx-auto flex max-w-xl flex-col gap-4 p-6">
+    <div className="mx-auto flex w-full max-w-3xl flex-col gap-4 p-6">
       <div>
         <h1 className="font-heading text-lg font-medium">Set up the runtime</h1>
         <p className="text-sm text-muted-foreground">
