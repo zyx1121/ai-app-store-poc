@@ -287,12 +287,12 @@ export function Store({ onLaunched }: { onLaunched: () => void }) {
   );
   const spacesFeed = usePagedFeed<SpaceSummary>(
     tab === "apps",
-    `${debouncedQuery} ${category ?? ""}`,
+    `${debouncedQuery}|${category ?? ""}`,
     fetchSpaces,
   );
   const modelsFeed = usePagedFeed<ModelSummary>(
     tab === "models",
-    `${debouncedQuery} ${pipeline ?? ""}`,
+    `${debouncedQuery}|${pipeline ?? ""}`,
     fetchModels,
   );
   const spaces = spacesFeed.feed.items;
@@ -558,7 +558,7 @@ export function Store({ onLaunched }: { onLaunched: () => void }) {
                       </span>
                     )}
                   </CardContent>
-                  <CardFooter className="flex gap-2">
+                  <CardFooter className="mt-auto flex gap-2">
                     <Button
                       className="flex-1"
                       disabled={space.compat === "incompatible" || launchingId === space.id}
@@ -640,7 +640,7 @@ export function Store({ onLaunched }: { onLaunched: () => void }) {
                     {model.pipeline_tag && <Badge variant="outline">{model.pipeline_tag}</Badge>}
                     <span>{formatCount(model.downloads)} downloads</span>
                   </CardContent>
-                  <CardFooter>
+                  <CardFooter className="mt-auto">
                     <Button
                       className="w-full"
                       disabled={model.compat === "incompatible"}
