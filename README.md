@@ -21,7 +21,7 @@ Edge AI boxes ship with a GPU and nothing to run on it. Getting one Hugging Face
 ```text
    ┌──────────────────────────── Windows ─────────────────────────────┐
    │  AI App Store (Tauri)                                            │
-   │   Browse ─ Running ─ Chat                Rust agent              │
+   │   Store ─ Running ─ Chat                 Rust agent              │
    │      │  invoke                              │ wsl.exe            │
    │      ▼                                      ▼                    │
    │  ┌───────────────────── WSL2 distro "ai-app-store" ───────────┐ │
@@ -37,7 +37,7 @@ Edge AI boxes ship with a GPU and nothing to run on it. Getting one Hugging Face
 ## Features
 
 - **Install the runtime in one click**: WSL2, an isolated Ubuntu distro, Docker Engine, NVIDIA container toolkit and Ollama, with a live log and a reboot prompt when Windows needs one.
-- **Browse Spaces and GGUF models live**: search the Hub, see likes, SDK, hardware tier and a compatibility badge (ready / maybe / incompatible, with the reason) before you run anything.
+- **Store: Spaces and GGUF models live**: search the Hub by text or category, scroll without end, see likes, SDK, hardware tier and a compatibility badge (ready / maybe / incompatible, with the reason) before you run anything.
 - **Run and use**: a Space becomes a container on a free local port and opens in the browser; a model is pulled into Ollama and served on an OpenAI-compatible API with a built-in chat UI.
 
 ## Install

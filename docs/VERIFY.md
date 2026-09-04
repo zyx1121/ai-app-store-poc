@@ -30,27 +30,27 @@ reliable (ollama/ollama#7969), which is why the zip is used.
    memory, any NPU, and the runtime plan for that vendor. On an integrated GPU
    the Memory column reads `<budget> shared (<carve-out> reserved)` and a
    "Model budget" line gives half of RAM; a 7B Q4 GGUF must show as fitting
-   the GPU in Browse. A discrete card shows its VRAM only. The status list has a
+   the GPU in the Store. A discrete card shows its VRAM only. The status list has a
    "Virtualization (UEFI)" row: it must be green (hypervisor running, or VT
    enabled in firmware) before provisioning can install WSL2. If it is red,
    the card explains the UEFI toggle; that step is the one thing the store
    cannot do for the user. Screenshot it.
 3. Click "Install". Watch the log: on non-NVIDIA machines the WSL Ollama step is
    skipped and an "Ollama runs natively on Windows" step downloads the zip.
-4. Browse, Models tab: run a small GGUF (any `Q4_K_M` under 5 GB). Chat with
+4. Store, Models tab: run a small GGUF (any `Q4_K_M` under 5 GB). Chat with
    it. Then note what `ollama ps` reports (the verification script prints it):
    `size_vram` above zero means the GPU backend is in use.
 5. Audio: Start Speaches (TTS). On AMD / Intel also download the whisper.cpp
    model and Start it: the card must show `vulkan` and reach Running; record
    and transcribe, then check with Task Manager (GPU tab, whisper-server.exe)
    that the GPU is used. Speak a reply through Speaches.
-6. Canvas: Start. On AMD / Intel the first start downloads and unpacks the
+6. Images: Start. On AMD / Intel the first start downloads and unpacks the
    official ComfyUI portable (1.8 GB); the card shows `rocm` or `xpu`. Download
    sd-turbo, generate one 512 x 512 image and note the time (a CPU run on the
    dev box takes 11 s for 2 steps; the GPU build should be well under that).
    ComfyUI's ROCm build refuses to start on a machine without a supported
    Radeon (RDNA 3 or newer); that is the expected failure on the wrong GPU.
-6b. GPU memory: with the chat model from step 4 still loaded, Canvas Start must
+6b. GPU memory: with the chat model from step 4 still loaded, Images Start must
    open a "GPU memory is in use" dialog listing the model when the two would
    not fit (on a 10 GB card a 7B Q4 at 16k context does not fit next to
    sd-turbo). "Unload and continue" frees it; the image then generates without
@@ -58,7 +58,7 @@ reliable (ollama/ollama#7969), which is why the zip is used.
    Unload buttons.
 7. Vision: Start the CV server (OpenVINO Model Server on non-NVIDIA), download
    YOLOv10n, load an image, Detect. Expect boxes with scores in under a second.
-8. Browse, Apps tab: "Build locally" on a small gradio Space, for example
+8. Store, Apps tab: "Build locally" on a small gradio Space, for example
    `lampongyuen/Gradio-Hello-World-3`. It must reach Running and open.
 9. Run the checklist and paste its output into the issue:
 

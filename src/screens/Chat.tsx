@@ -220,7 +220,7 @@ export function Chat({ initialInstanceId }: { initialInstanceId?: string }) {
           </SelectContent>
         </Select>
         {instances.length === 0 && (
-          <p className="text-sm text-muted-foreground">No running models. Launch one from Browse.</p>
+          <p className="text-sm text-muted-foreground">No running models. Launch one from the Store.</p>
         )}
       </div>
       {selected && <ChatSession key={selected.id} instance={selected} />}

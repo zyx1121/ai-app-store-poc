@@ -144,7 +144,7 @@ function formatElapsed(seconds: number): string {
   return `${m}:${String(s).padStart(2, "0")}`;
 }
 
-export function Audio() {
+export function Speech() {
   const [status, setStatus] = useState<ServiceStatus | null>(null);
   const [serviceBusy, setServiceBusy] = useState(false);
   const [serviceError, setServiceError] = useState<string | null>(null);
@@ -760,7 +760,7 @@ export function Audio() {
                 </SelectContent>
               </Select>
               {instances.length === 0 && (
-                <p className="text-sm text-muted-foreground">No running models. Launch one from Browse.</p>
+                <p className="text-sm text-muted-foreground">No running models. Launch one from the Store.</p>
               )}
               <span className="flex-1" />
               <Button

@@ -16,7 +16,7 @@ pub const BUILD_ROOT: &str = "/var/lib/aias/build";
 /// Whether the next build may use a Space repo's own Dockerfile verbatim
 /// instead of the generated one. A repo's Dockerfile runs arbitrary `RUN`
 /// steps with network access on this machine, so it needs the user's consent
-/// (Browse.tsx shows a one-time dialog before the first "Build locally").
+/// (Store.tsx shows a one-time dialog before the first "Build locally").
 ///
 /// This is a flag rather than a `build_space` argument because
 /// `instances::build_space` already calls this function with a fixed
@@ -256,7 +256,7 @@ pub async fn build_space(
     }
 
     // The repo's own Dockerfile runs arbitrary `RUN` steps with network access on
-    // this machine; only use it verbatim when the user consented (Browse.tsx's
+    // this machine; only use it verbatim when the user consented (Store.tsx's
     // one-time dialog, threaded through `USE_REPO_DOCKERFILE`). Otherwise prefer
     // the generated Dockerfile even when the Space ships its own.
     let use_repo_dockerfile = has_dockerfile && USE_REPO_DOCKERFILE.load(Ordering::Relaxed);
@@ -344,6 +344,8 @@ mod tests {
             // `secrets` (#57) is a new SpaceSummary field; this fixture never
             // exercises it, only the local-build flow.
             secrets: vec![],
+            description: None,
+            category: None,
         }
     }
 

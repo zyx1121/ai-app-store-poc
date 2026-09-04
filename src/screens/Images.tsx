@@ -67,7 +67,7 @@ type SourceImage = {
   url: string;
 };
 
-type CanvasResult = {
+type ImageResult = {
   id: string;
   url: string;
   blob: Blob;
@@ -107,7 +107,7 @@ function nodeErrorSummary(errors: Record<string, unknown>): string {
   return parts.join("; ");
 }
 
-export function Canvas() {
+export function Images() {
   const [status, setStatus] = useState<ServiceStatus | null>(null);
   const [serviceBusy, setServiceBusy] = useState(false);
   const { gate, dialog: gpuDialog } = useGpuGate();
@@ -133,8 +133,8 @@ export function Canvas() {
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [genError, setGenError] = useState<string | null>(null);
 
-  const [result, setResult] = useState<CanvasResult | null>(null);
-  const [history, setHistory] = useState<CanvasResult[]>([]);
+  const [result, setResult] = useState<ImageResult | null>(null);
+  const [history, setHistory] = useState<ImageResult[]>([]);
 
   const clientIdRef = useRef(nanoid());
   const cancelledRef = useRef(false);
@@ -445,7 +445,7 @@ export function Canvas() {
       const url = URL.createObjectURL(blob);
       resultUrlsRef.current.add(url);
 
-      const canvasResult: CanvasResult = {
+      const imageResult: ImageResult = {
         id: body.prompt_id,
         url,
         blob,
@@ -458,9 +458,9 @@ export function Canvas() {
         usedSource: Boolean(uploadedName),
         strength: uploadedName ? strength : null,
       };
-      setResult(canvasResult);
+      setResult(imageResult);
       setHistory((prev) => {
-        const next = [canvasResult, ...prev];
+        const next = [imageResult, ...prev];
         const overflow = next.splice(HISTORY_LIMIT);
         overflow.forEach((r) => {
           URL.revokeObjectURL(r.url);
@@ -495,21 +495,21 @@ export function Canvas() {
     }
   }
 
-  function useAsSource(r: CanvasResult) {
+  function useAsSource(r: ImageResult) {
     if (sourceUrlRef.current) URL.revokeObjectURL(sourceUrlRef.current);
     const url = URL.createObjectURL(r.blob);
     sourceUrlRef.current = url;
     setSourceImage({ blob: r.blob, url });
   }
 
-  function handleSave(r: CanvasResult) {
+  function handleSave(r: ImageResult) {
     const a = document.createElement("a");
     a.href = r.url;
     a.download = `${r.id}.png`;
     a.click();
   }
 
-  async function handleCopyPrompt(r: CanvasResult) {
+  async function handleCopyPrompt(r: ImageResult) {
     try {
       await navigator.clipboard.writeText(r.prompt);
     } catch {
@@ -770,7 +770,7 @@ export function Canvas() {
 
         <Card className="flex flex-col">
           <CardHeader>
-            <CardTitle>Canvas</CardTitle>
+            <CardTitle>Result</CardTitle>
           </CardHeader>
           <CardContent className="flex flex-col gap-3">
             <div className="flex min-h-48 items-center justify-center overflow-hidden rounded-lg border border-border bg-muted">

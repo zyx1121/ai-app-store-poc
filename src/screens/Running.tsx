@@ -62,7 +62,7 @@ function parseEnvLines(text: string): Record<string, string> {
 
 /** A Space that failed to launch (missing secret, gated model without a
  * token) can be retried here with corrected values, without going back to
- * Browse (#57). */
+ * the Store (#57). */
 function EnvRetry({ onRetry }: { onRetry: (env: Record<string, string>) => void }) {
   const [text, setText] = useState("");
   const [retrying, setRetrying] = useState(false);
@@ -218,7 +218,7 @@ export function Running({ onOpenChat }: { onOpenChat: (instanceId: string) => vo
       <div className="flex flex-col gap-3 p-6">
         <GpuMemoryCard />
         <p className="text-sm text-muted-foreground">
-          No instances yet. Launch an app or model from Browse.
+          No instances yet. Launch an app or model from the Store.
         </p>
       </div>
     );
@@ -232,7 +232,7 @@ export function Running({ onOpenChat }: { onOpenChat: (instanceId: string) => vo
       <GpuMemoryCard />
       {live.length === 0 && (
         <p className="text-sm text-muted-foreground">
-          No active instances. Launch an app or model from Browse.
+          No active instances. Launch an app or model from the Store.
         </p>
       )}
       {live.map((instance) => (
