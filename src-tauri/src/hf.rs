@@ -17,7 +17,7 @@ use crate::state::AppState;
 const HF: &str = "https://huggingface.co/api";
 const HF_SITE: &str = "https://huggingface.co";
 
-/// A cached Browse search result stays fresh for this long before a search
+/// A cached Store search result stays fresh for this long before a search
 /// re-fetches its detail and secrets (#67).
 const CACHE_TTL: Duration = Duration::from_secs(600);
 
@@ -54,12 +54,81 @@ pub struct SpaceSummary {
     /// container's default environment; the user must supply them (#57).
     #[serde(default)]
     pub secrets: Vec<String>,
+    /// One-line summary HF generates for the Space ("Generate images from
+    /// text prompts"); only the semantic search endpoint returns it.
+    pub description: Option<String>,
+    /// HF's category label ("Image Generation"); same source as `description`.
+    pub category: Option<String>,
 }
+
+/// One page of Store results plus the opaque cursor for the next page, or
+/// `None` once the listing is exhausted.
+#[derive(Debug, Clone, Serialize)]
+pub struct SpacePage {
+    pub items: Vec<SpaceSummary>,
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ModelPage {
+    pub items: Vec<ModelSummary>,
+    pub next_cursor: Option<String>,
+}
+
+/// Category slugs HF's Spaces semantic search accepts; anything else is
+/// rejected by the Hub with a 400, so it is validated here first.
+pub const SPACE_CATEGORIES: &[&str] = &[
+    "image-generation",
+    "video-generation",
+    "text-generation",
+    "language-translation",
+    "speech-synthesis",
+    "voice-cloning",
+    "face-recognition",
+    "object-detection",
+    "pose-estimation",
+    "text-analysis",
+    "sentiment-analysis",
+    "question-answering",
+    "code-generation",
+    "data-visualization",
+    "3d-modeling",
+    "image-editing",
+    "background-removal",
+    "image-upscaling",
+    "ocr",
+    "document-analysis",
+    "visual-qa",
+    "image-captioning",
+    "chatbots",
+    "text-summarization",
+    "music-generation",
+    "medical-imaging",
+    "financial-analysis",
+    "game-ai",
+    "model-benchmarking",
+    "fine-tuning-tools",
+    "dataset-creation",
+    "anomaly-detection",
+    "recommendation-systems",
+    "character-animation",
+    "style-transfer",
+    "agent-environment",
+    "image",
+    "other",
+];
+
+/// Pipeline tags the Models tab can filter on; both are what Ollama serves.
+pub const MODEL_PIPELINES: &[&str] = &["text-generation", "image-text-to-text"];
+
+/// A semantic search answer is a fixed batch (about 100 Spaces, no server
+/// paging), so it is kept whole and sliced locally; the cursor is the offset.
+const SEMANTIC_TTL: Duration = Duration::from_secs(600);
 
 impl SpaceSummary {
     /// Spaces on a GPU tier hold VRAM of their own; CPU tiers (and Spaces
     /// with no tier at all) run without the device. Mirrors `spaceWantsGpu`
-    /// in the Browse screen.
+    /// in the Store screen.
     pub fn wants_gpu(&self) -> bool {
         self.hardware
             .as_deref()
@@ -90,8 +159,11 @@ pub struct GgufFile {
 
 // ---- raw API shapes -------------------------------------------------------
 
-#[derive(Deserialize)]
-struct RawSpace {
+/// Shape shared by the listing endpoint (`/api/spaces`, has `cardData`), the
+/// detail endpoint, and the semantic search endpoint (no `cardData`, but
+/// top-level `title` / `emoji` / `ai_*` fields).
+#[derive(Deserialize, Clone)]
+pub struct RawSpace {
     id: String,
     #[serde(default)]
     author: Option<String>,
@@ -103,9 +175,31 @@ struct RawSpace {
     card: Option<RawCard>,
     #[serde(default)]
     runtime: Option<RawRuntime>,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    emoji: Option<String>,
+    #[serde(default, rename = "ai_short_description")]
+    description: Option<String>,
+    #[serde(default, rename = "ai_category")]
+    category: Option<String>,
 }
 
-#[derive(Deserialize, Default)]
+impl RawSpace {
+    /// The detail endpoint is authoritative for card and runtime, but never
+    /// carries the `ai_*` fields, so those come from the listing entry.
+    fn merge_detail(self, detail: RawSpace) -> RawSpace {
+        RawSpace {
+            title: self.title.or(detail.title),
+            emoji: self.emoji.or(detail.emoji),
+            description: self.description.or(detail.description),
+            category: self.category.or(detail.category),
+            ..detail
+        }
+    }
+}
+
+#[derive(Deserialize, Default, Clone)]
 struct RawCard {
     #[serde(default)]
     title: Option<String>,
@@ -179,24 +273,110 @@ struct RawSibling {
 
 // ---- Spaces ---------------------------------------------------------------
 
-/// Cached summaries cut repeat detail + secrets fetches for Spaces the Browse
+/// Cached summaries cut repeat detail + secrets fetches for Spaces the Store
 /// tab has already scored this session (#67); a request superseded mid-flight
 /// by a newer search aborts instead of finishing its detail fan-out.
 pub async fn search_spaces(
     state: &AppState,
     query: &str,
+    category: Option<&str>,
+    cursor: Option<&str>,
     limit: usize,
-) -> Result<Vec<SpaceSummary>> {
+) -> Result<SpacePage> {
     let limit = limit.clamp(1, 60);
+    let query = query.trim();
+    let category = category.map(str::trim).filter(|c| !c.is_empty());
+    if let Some(c) = category {
+        if !SPACE_CATEGORIES.contains(&c) {
+            return Err(Error::Other(format!("unknown Space category `{c}`")));
+        }
+    }
+    let cursor = cursor.map(str::trim).filter(|c| !c.is_empty());
+
+    // The plain listing (most liked first) pages server-side through the
+    // `Link` header; a query or category goes through HF's semantic search,
+    // which answers with one fixed batch that is sliced locally.
+    let (raw, next_cursor) = if query.is_empty() && category.is_none() {
+        list_spaces(state, cursor, limit).await?
+    } else {
+        semantic_spaces(state, query, category, cursor, limit).await?
+    };
+    let items = annotate_spaces(state, raw).await;
+    Ok(SpacePage { items, next_cursor })
+}
+
+async fn list_spaces(
+    state: &AppState,
+    cursor: Option<&str>,
+    limit: usize,
+) -> Result<(Vec<RawSpace>, Option<String>)> {
+    let mut url = format!("{HF}/spaces?limit={limit}&sort=likes&direction=-1&full=true");
+    if let Some(c) = cursor {
+        url.push_str(&format!("&cursor={}", urlencode(c)));
+    }
+    let token = state.hf_token();
+    get_page::<Vec<RawSpace>>(&state.http, &url, token.as_deref()).await
+}
+
+async fn semantic_spaces(
+    state: &AppState,
+    query: &str,
+    category: Option<&str>,
+    cursor: Option<&str>,
+    limit: usize,
+) -> Result<(Vec<RawSpace>, Option<String>)> {
+    let key = format!("{query}\u{0}{}", category.unwrap_or(""));
+    let cached = state
+        .semantic_cache
+        .lock()
+        .ok()
+        .and_then(|m| m.get(&key).cloned())
+        .filter(|(_, at)| at.elapsed() < SEMANTIC_TTL)
+        .map(|(v, _)| v);
+    let all = match cached {
+        Some(v) => v,
+        None => {
+            let mut url = format!("{HF}/spaces/semantic-search?");
+            if !query.is_empty() {
+                url.push_str(&format!("q={}&", urlencode(query)));
+            }
+            if let Some(c) = category {
+                url.push_str(&format!("category={}&", urlencode(c)));
+            }
+            let token = state.hf_token();
+            let mut v: Vec<RawSpace> = get(&state.http, &url, token.as_deref()).await?;
+            // With no query the relevance order is meaningless; a category
+            // browse reads like the store front: most liked first.
+            if query.is_empty() {
+                v.sort_by_key(|s| std::cmp::Reverse(s.likes));
+            }
+            if let Ok(mut m) = state.semantic_cache.lock() {
+                m.insert(key, (v.clone(), Instant::now()));
+            }
+            v
+        }
+    };
+    let offset: usize = match cursor {
+        Some(c) => c
+            .parse()
+            .map_err(|_| Error::Other(format!("bad cursor `{c}`")))?,
+        None => 0,
+    };
+    let end = offset.saturating_add(limit).min(all.len());
+    let page = all
+        .get(offset..end)
+        .map(<[RawSpace]>::to_vec)
+        .unwrap_or_default();
+    let next = (end < all.len()).then(|| end.to_string());
+    Ok((page, next))
+}
+
+/// Compat verdict, hardware tier and secrets for each raw entry, in order.
+/// Entries whose detail fetch is aborted by a newer search are dropped.
+async fn annotate_spaces(state: &AppState, raw: Vec<RawSpace>) -> Vec<SpaceSummary> {
     let http = state.http.clone();
     let token = state.hf_token();
     let has_gpu = state.has_gpu();
-
-    let mut url = format!("{HF}/spaces?limit={limit}&sort=likes&direction=-1&full=true");
-    if !query.trim().is_empty() {
-        url.push_str(&format!("&search={}", urlencode(query.trim())));
-    }
-    let raw: Vec<RawSpace> = get(&http, &url, token.as_deref()).await?;
 
     let my_gen = state.search_generation.fetch_add(1, Ordering::SeqCst) + 1;
 
@@ -204,7 +384,13 @@ pub async fn search_spaces(
     let mut pending: Vec<(usize, RawSpace)> = Vec::new();
     for (i, s) in raw.into_iter().enumerate() {
         match cache_get(&state.space_cache, &s.id) {
-            Some(summary) => results[i] = Some(summary),
+            Some(mut summary) => {
+                // A hit from the plain listing has no `ai_*` fields; the
+                // semantic entry that found it now does.
+                summary.description = s.description.or(summary.description);
+                summary.category = s.category.or(summary.category);
+                results[i] = Some(summary)
+            }
             None => pending.push((i, s)),
         }
     }
@@ -225,11 +411,10 @@ pub async fn search_spaces(
             set.spawn(async move {
                 let detail =
                     get::<RawSpace>(&http, &format!("{HF}/spaces/{}", s.id), token.as_deref())
-                        .await;
-                let detail_ok = detail.is_ok();
-                let rt = detail.ok().and_then(|d| d.runtime);
+                        .await
+                        .ok();
                 let secrets = detect_secrets(&http, token.as_deref(), &s.id, &app_file_hint).await;
-                (i, s, rt, detail_ok, secrets)
+                (i, s, detail, secrets)
             });
         }
         while let Some(joined) = set.join_next().await {
@@ -238,8 +423,17 @@ pub async fn search_spaces(
                 set.abort_all();
                 break;
             }
-            if let Ok((i, s, rt, detail_ok, secrets)) = joined {
+            if let Ok((i, s, detail, secrets)) = joined {
                 let id = s.id.clone();
+                let detail_ok = detail.is_some();
+                // Semantic search entries have no card; the detail carries it.
+                let (s, rt) = match detail {
+                    Some(d) => {
+                        let rt = d.runtime.clone();
+                        (s.merge_detail(d), rt)
+                    }
+                    None => (s, None),
+                };
                 let summary = summarize_space(s, rt, has_gpu, detail_ok, secrets);
                 if detail_ok {
                     cache_put(&state.space_cache, id, summary.clone());
@@ -249,11 +443,11 @@ pub async fn search_spaces(
         }
     }
 
-    Ok(results.into_iter().flatten().collect())
+    results.into_iter().flatten().collect()
 }
 
 /// Details for one Space (used at launch time); always fetched live, never
-/// from the Browse cache, so the compat gate is checked fresh before a run.
+/// from the Store cache, so the compat gate is checked fresh before a run.
 pub async fn space(state: &AppState, id: &str) -> Result<SpaceSummary> {
     validate_repo(id)?;
     let token = state.hf_token();
@@ -335,11 +529,13 @@ fn summarize_space(
         hardware,
         app_port,
         app_file,
-        title: card.title,
-        emoji: card.emoji,
+        title: card.title.or(s.title),
+        emoji: card.emoji.or(s.emoji),
         compat,
         compat_reason: reason,
         secrets,
+        description: s.description,
+        category: s.category,
     }
 }
 
@@ -407,23 +603,53 @@ fn space_compat(
 pub async fn search_models(
     state: &AppState,
     query: &str,
+    pipeline: Option<&str>,
+    cursor: Option<&str>,
     limit: usize,
-) -> Result<Vec<ModelSummary>> {
+) -> Result<ModelPage> {
     let limit = limit.clamp(1, 60);
-    let mut url = format!("{HF}/models?limit={limit}&filter=gguf&sort=downloads&direction=-1");
-    if !query.trim().is_empty() {
-        url.push_str(&format!("&search={}", urlencode(query.trim())));
+    let pipeline = pipeline.map(str::trim).filter(|p| !p.is_empty());
+    if let Some(p) = pipeline {
+        if !MODEL_PIPELINES.contains(&p) {
+            return Err(Error::Other(format!("unknown pipeline `{p}`")));
+        }
     }
     let token = state.hf_token();
-    let raw: Vec<RawModel> = get(&state.http, &url, token.as_deref()).await?;
+    let mut cursor = cursor
+        .map(str::trim)
+        .filter(|c| !c.is_empty())
+        .map(str::to_string);
+    let mut items = Vec::new();
     // A diffusion or embedding GGUF (sd-turbo) pulls fine and then 500s on
     // /api/generate; there is nothing the user can do with it here, so it is
-    // dropped rather than shown as Incompatible.
-    Ok(raw
-        .into_iter()
-        .map(summarize_model)
-        .filter(|m| m.compat != Compat::Incompatible)
-        .collect())
+    // dropped rather than shown as Incompatible. A page can lose every entry
+    // that way, so keep paging (bounded) until something is left to show.
+    for _ in 0..5 {
+        let mut url = format!("{HF}/models?limit={limit}&filter=gguf&sort=downloads&direction=-1");
+        if !query.trim().is_empty() {
+            url.push_str(&format!("&search={}", urlencode(query.trim())));
+        }
+        if let Some(p) = pipeline {
+            url.push_str(&format!("&pipeline_tag={}", urlencode(p)));
+        }
+        if let Some(c) = &cursor {
+            url.push_str(&format!("&cursor={}", urlencode(c)));
+        }
+        let (raw, next): (Vec<RawModel>, _) = get_page(&state.http, &url, token.as_deref()).await?;
+        items.extend(
+            raw.into_iter()
+                .map(summarize_model)
+                .filter(|m| m.compat != Compat::Incompatible),
+        );
+        cursor = next;
+        if !items.is_empty() || cursor.is_none() {
+            break;
+        }
+    }
+    Ok(ModelPage {
+        items,
+        next_cursor: cursor,
+    })
 }
 
 fn summarize_model(m: RawModel) -> ModelSummary {
@@ -549,6 +775,70 @@ async fn get<T: for<'de> Deserialize<'de>>(
         return Err(Error::Hf(format!("{} -> {}", url, resp.status())));
     }
     Ok(resp.json::<T>().await?)
+}
+
+/// `get` plus the next-page cursor from the Hub's `Link: <...cursor=X>;
+/// rel="next"` header, `None` on the last page.
+async fn get_page<T: for<'de> Deserialize<'de>>(
+    http: &reqwest::Client,
+    url: &str,
+    token: Option<&str>,
+) -> Result<(T, Option<String>)> {
+    let mut req = http.get(url);
+    if let Some(t) = token {
+        req = req.header("Authorization", format!("Bearer {t}"));
+    }
+    let resp = req.send().await?;
+    if !resp.status().is_success() {
+        return Err(Error::Hf(format!("{} -> {}", url, resp.status())));
+    }
+    let next = resp
+        .headers()
+        .get("link")
+        .and_then(|v| v.to_str().ok())
+        .and_then(next_cursor);
+    Ok((resp.json::<T>().await?, next))
+}
+
+/// The `cursor` value of the `rel="next"` link, URL-decoded.
+fn next_cursor(link: &str) -> Option<String> {
+    link.split(',')
+        .find(|part| part.contains("rel=\"next\""))
+        .and_then(|part| {
+            let url = part.trim().strip_prefix('<')?.split('>').next()?;
+            url.split(['?', '&'])
+                .find_map(|kv| kv.strip_prefix("cursor="))
+                .map(urldecode)
+        })
+}
+
+fn urldecode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'%' if i + 2 < bytes.len() => match u8::from_str_radix(&s[i + 1..i + 3], 16) {
+                Ok(b) => {
+                    out.push(b);
+                    i += 3;
+                }
+                Err(_) => {
+                    out.push(b'%');
+                    i += 1;
+                }
+            },
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            b => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// Fetch one Space source file, bounded to `MAX_SOURCE_BYTES`; a missing file,
@@ -760,6 +1050,40 @@ mod tests {
             space_compat(Some("gradio"), Some("SLEEPING"), Some("cpu-basic"), true).0,
             Compat::Ready
         );
+    }
+
+    #[test]
+    fn link_header_yields_decoded_next_cursor() {
+        let link = r#"<https://huggingface.co/api/spaces?limit=3&sort=likes&cursor=eyJhIjoxfQ%3D%3D>; rel="next""#;
+        assert_eq!(next_cursor(link).as_deref(), Some("eyJhIjoxfQ=="));
+        let two = r#"<https://x/?a=1>; rel="prev", <https://x/?cursor=abc&limit=2>; rel="next""#;
+        assert_eq!(next_cursor(two).as_deref(), Some("abc"));
+        assert_eq!(next_cursor(r#"<https://x/?a=1>; rel="prev""#), None);
+        assert_eq!(next_cursor(""), None);
+    }
+
+    #[test]
+    fn semantic_entries_take_card_from_detail_and_keep_ai_fields() {
+        let listing: RawSpace = serde_json::from_str(
+            r#"{"id":"a/b","likes":5,"title":"Sem title","emoji":"x",
+                "ai_short_description":"Generate images","ai_category":"Image Generation"}"#,
+        )
+        .unwrap();
+        let detail: RawSpace = serde_json::from_str(
+            r#"{"id":"a/b","sdk":"gradio","likes":7,
+                "cardData":{"title":"Card title","app_file":"demo.py","app_port":7861},
+                "runtime":{"stage":"RUNNING","hardware":{"current":"cpu-basic"}}}"#,
+        )
+        .unwrap();
+        let rt = detail.runtime.clone();
+        let s = summarize_space(listing.merge_detail(detail), rt, true, true, vec![]);
+        assert_eq!(s.title.as_deref(), Some("Card title"));
+        assert_eq!(s.app_file, "demo.py");
+        assert_eq!(s.app_port, 7861);
+        assert_eq!(s.likes, 7);
+        assert_eq!(s.description.as_deref(), Some("Generate images"));
+        assert_eq!(s.category.as_deref(), Some("Image Generation"));
+        assert_eq!(s.compat, Compat::Ready);
     }
 
     #[test]

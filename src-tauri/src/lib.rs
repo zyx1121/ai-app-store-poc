@@ -40,18 +40,36 @@ async fn provision_runtime(
 async fn search_spaces(
     state: State<'_, AppState>,
     query: String,
+    category: Option<String>,
+    cursor: Option<String>,
     limit: Option<usize>,
-) -> CmdResult<Vec<hf::SpaceSummary>> {
-    cmd(hf::search_spaces(state.inner(), &query, limit.unwrap_or(24)).await)
+) -> CmdResult<hf::SpacePage> {
+    cmd(hf::search_spaces(
+        state.inner(),
+        &query,
+        category.as_deref(),
+        cursor.as_deref(),
+        limit.unwrap_or(24),
+    )
+    .await)
 }
 
 #[tauri::command]
 async fn search_models(
     state: State<'_, AppState>,
     query: String,
+    pipeline: Option<String>,
+    cursor: Option<String>,
     limit: Option<usize>,
-) -> CmdResult<Vec<hf::ModelSummary>> {
-    cmd(hf::search_models(state.inner(), &query, limit.unwrap_or(24)).await)
+) -> CmdResult<hf::ModelPage> {
+    cmd(hf::search_models(
+        state.inner(),
+        &query,
+        pipeline.as_deref(),
+        cursor.as_deref(),
+        limit.unwrap_or(24),
+    )
+    .await)
 }
 
 #[tauri::command]

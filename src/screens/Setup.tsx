@@ -38,35 +38,37 @@ function runtimePlan(vendor: Vendor): string[] {
   switch (vendor) {
     case "nvidia":
       return [
-        "LLM: Ollama in WSL (CUDA)",
-        "Speech: Speaches (CUDA)",
-        "Images: ComfyUI (CUDA)",
-        "Detection: Triton Inference Server (CUDA)",
-        "Spaces: pull CUDA images",
+        "Chat (language models): Ollama in WSL2, CUDA",
+        "Speech to text, text to speech: Speaches, CUDA",
+        "Text to image, image to image: ComfyUI, CUDA",
+        "Object detection: Triton Inference Server, CUDA",
+        "Apps (Hugging Face Spaces): prebuilt CUDA images",
       ];
     case "amd":
       return [
-        "LLM: Ollama on Windows (ROCm, Vulkan fallback)",
-        "Speech: whisper.cpp on Windows (Vulkan) for STT, Speaches (CPU) for TTS",
-        "Images: ComfyUI portable on Windows (ROCm)",
-        "Detection: OpenVINO Model Server (CPU)",
-        "Spaces: pull, or build locally for CPU",
+        "Chat (language models): Ollama on Windows, ROCm with Vulkan fallback",
+        "Speech to text: whisper.cpp on Windows, Vulkan",
+        "Text to speech: Speaches, CPU",
+        "Text to image, image to image: ComfyUI portable on Windows, ROCm",
+        "Object detection: OpenVINO Model Server, CPU",
+        "Apps (Hugging Face Spaces): prebuilt images, or build locally for CPU",
       ];
     case "intel":
       return [
-        "LLM: Ollama on Windows (Vulkan)",
-        "Speech: whisper.cpp on Windows (Vulkan) for STT, Speaches (CPU) for TTS",
-        "Images: ComfyUI portable on Windows (XPU)",
-        "Detection: OpenVINO Model Server (CPU)",
-        "Spaces: pull, or build locally for CPU",
+        "Chat (language models): Ollama on Windows, Vulkan",
+        "Speech to text: whisper.cpp on Windows, Vulkan",
+        "Text to speech: Speaches, CPU",
+        "Text to image, image to image: ComfyUI portable on Windows, XPU",
+        "Object detection: OpenVINO Model Server, CPU (NPU when present)",
+        "Apps (Hugging Face Spaces): prebuilt images, or build locally for CPU",
       ];
     case "cpu":
       return [
-        "LLM: Ollama on Windows (CPU)",
-        "Speech: Speaches (CPU)",
-        "Images: ComfyUI (CPU, slow)",
-        "Detection: OpenVINO Model Server (CPU)",
-        "Spaces: pull, or build locally for CPU",
+        "Chat (language models): Ollama on Windows, CPU",
+        "Speech to text, text to speech: Speaches, CPU",
+        "Text to image, image to image: ComfyUI, CPU (slow)",
+        "Object detection: OpenVINO Model Server, CPU",
+        "Apps (Hugging Face Spaces): prebuilt images, or build locally for CPU",
       ];
   }
 }
@@ -134,13 +136,14 @@ function HardwareCard({
             </div>
           ))}
           <p className="text-xs text-muted-foreground">
-            NPU detected; used for detection on Intel, other modalities not yet
+            NPU detected. Used for object detection on Intel; chat, speech and image generation
+            do not use it yet.
           </p>
         </div>
       )}
 
       <div className="flex flex-col gap-1 border-t border-border pt-2 text-sm">
-        <span className="font-medium">Runtime plan</span>
+        <span className="font-medium">What runs where on this machine</span>
         <ul className="list-disc pl-5 text-xs text-muted-foreground">
           {runtimePlan(vendor).map((line) => (
             <li key={line}>{line}</li>
@@ -373,7 +376,7 @@ function rows(status: RuntimeStatus): Row[] {
       detail: status.wsl_version ?? undefined,
     },
     {
-      label: "Runtime distro",
+      label: "WSL2 distro (ai-app-store)",
       ok: status.distro_present && status.distro_running,
     },
     {
@@ -388,14 +391,14 @@ function rows(status: RuntimeStatus): Row[] {
             ? "enabled"
             : "turned off in firmware",
     },
-    { label: "Docker", ok: status.docker_ok },
+    { label: "Docker in WSL2", ok: status.docker_ok },
     {
       label: "GPU in WSL2",
       ok: status.gpu_ok,
       na: status.vendor !== "nvidia",
       detail:
         status.vendor !== "nvidia"
-          ? "not used: LLMs run natively on Windows for this GPU"
+          ? "not needed: models run natively on Windows for this GPU"
           : status.gpu_name
             ? `${status.gpu_name}${status.vram_mb ? ` (${(status.vram_mb / 1024).toFixed(1)} GB VRAM)` : ""}`
             : undefined,
@@ -478,9 +481,10 @@ export function Setup({
   return (
     <div className="mx-auto flex w-full max-w-3xl flex-col gap-4 p-6">
       <div>
-        <h1 className="font-heading text-lg font-medium">Set up the runtime</h1>
+        <h1 className="font-heading text-lg font-medium">Setup</h1>
         <p className="text-sm text-muted-foreground">
-          AI App Store runs apps and models locally through WSL2, Docker and Ollama.
+          Hardware, runtime, updates and storage. Apps and models run locally through WSL2, Docker
+          and Ollama.
         </p>
       </div>
 

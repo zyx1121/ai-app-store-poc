@@ -136,7 +136,47 @@ export type SpaceSummary = {
   compat_reason: string | null;
   /** env var names the Space's source reads that the user must supply (#57) */
   secrets: string[];
+  /** HF's one-line summary ("Generate images from text prompts"); only when the
+   * result came from a query or category search */
+  description: string | null;
+  /** HF's category label ("Image Generation"); same source as `description` */
+  category: string | null;
 };
+
+/** One page of Store results; `next_cursor` is opaque, `null` on the last page. */
+export type SpacePage = { items: SpaceSummary[]; next_cursor: string | null };
+export type ModelPage = { items: ModelSummary[]; next_cursor: string | null };
+
+/** Space categories the Store offers, a subset of what HF's semantic search
+ * accepts (see `SPACE_CATEGORIES` in hf.rs), in the order shown. */
+export const SPACE_CATEGORIES: { slug: string; label: string }[] = [
+  { slug: "image-generation", label: "Image generation" },
+  { slug: "image-editing", label: "Image editing" },
+  { slug: "video-generation", label: "Video generation" },
+  { slug: "chatbots", label: "Chatbots" },
+  { slug: "text-generation", label: "Text generation" },
+  { slug: "speech-synthesis", label: "Speech synthesis" },
+  { slug: "voice-cloning", label: "Voice cloning" },
+  { slug: "music-generation", label: "Music generation" },
+  { slug: "object-detection", label: "Object detection" },
+  { slug: "image-captioning", label: "Image captioning" },
+  { slug: "visual-qa", label: "Visual QA" },
+  { slug: "ocr", label: "OCR" },
+  { slug: "document-analysis", label: "Document analysis" },
+  { slug: "background-removal", label: "Background removal" },
+  { slug: "image-upscaling", label: "Image upscaling" },
+  { slug: "style-transfer", label: "Style transfer" },
+  { slug: "3d-modeling", label: "3D modeling" },
+  { slug: "code-generation", label: "Code generation" },
+  { slug: "language-translation", label: "Translation" },
+  { slug: "text-summarization", label: "Summarization" },
+];
+
+/** Model pipelines the Store can filter on; both are what Ollama serves. */
+export const MODEL_PIPELINES: { slug: string; label: string }[] = [
+  { slug: "text-generation", label: "Chat (text)" },
+  { slug: "image-text-to-text", label: "Chat with images" },
+];
 
 export type GgufFile = {
   filename: string;
@@ -159,11 +199,29 @@ export type ModelSummary = {
   compat_reason: string | null;
 };
 
-export const searchSpaces = (query: string, limit = 24) =>
-  invoke<SpaceSummary[]>("search_spaces", { query, limit });
+/** Empty query and no category: HF's most-liked listing, paged by the Hub.
+ * Otherwise HF's semantic search (which also yields `description`), paged locally. */
+export const searchSpaces = (
+  query: string,
+  opts: { category?: string | null; cursor?: string | null; limit?: number } = {},
+) =>
+  invoke<SpacePage>("search_spaces", {
+    query,
+    category: opts.category ?? null,
+    cursor: opts.cursor ?? null,
+    limit: opts.limit ?? 24,
+  });
 
-export const searchModels = (query: string, limit = 24) =>
-  invoke<ModelSummary[]>("search_models", { query, limit });
+export const searchModels = (
+  query: string,
+  opts: { pipeline?: string | null; cursor?: string | null; limit?: number } = {},
+) =>
+  invoke<ModelPage>("search_models", {
+    query,
+    pipeline: opts.pipeline ?? null,
+    cursor: opts.cursor ?? null,
+    limit: opts.limit ?? 24,
+  });
 
 /** GGUF files of one model repo, sorted by size ascending, with fit annotations. */
 export const modelFiles = (repo: string) => invoke<GgufFile[]>("model_files", { repo });
@@ -219,7 +277,7 @@ export const launchSpace = (id: string, env?: Record<string, string>, leaseId?: 
  * target the CPU; Spaces needing CUDA-only packages are refused with the reason.
  *
  * `useRepoDockerfile` opts into running the Space repo's own Dockerfile verbatim
- * (network access, arbitrary `RUN` steps) instead of the generated one; Browse.tsx
+ * (network access, arbitrary `RUN` steps) instead of the generated one; Store.tsx
  * gates it behind a one-time consent dialog and defaults it off.
  */
 export const buildSpace = (

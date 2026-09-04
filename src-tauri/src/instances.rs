@@ -220,7 +220,7 @@ async fn start_space(
     let state = app.state::<AppState>();
     let id = space.id.clone();
     let inst_id = format!("space-{}", slug(&id));
-    // CPU-tier Spaces run without the GPU: the same rule Browse uses to skip
+    // CPU-tier Spaces run without the GPU: the same rule the Store uses to skip
     // the gate, so they never count as residents either (#58).
     let gpu = state.has_gpu() && space.wants_gpu();
     let inst = Instance {
@@ -389,7 +389,7 @@ async fn image_size_mb(image: &str) -> Option<u64> {
 
 /// Cached `image_size_mb`, keyed by image reference so a re-launch of the same
 /// Space skips the round trip. Called from exactly one place, `run_space`
-/// right before its pull: Browse never triggers `docker manifest inspect`
+/// right before its pull: the Store never triggers `docker manifest inspect`
 /// itself, so browsing a search never fans out a `wsl.exe` spawn per card (#55).
 async fn cached_image_size_mb(state: &AppState, image: &str) -> Option<u64> {
     if let Some(mb) = state

@@ -1,11 +1,13 @@
-import { useEffect, useRef, useState, type KeyboardEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from "react";
 import {
   buildSpace,
   launchModel,
   launchSpace,
   modelFiles,
+  MODEL_PIPELINES,
   searchModels,
   searchSpaces,
+  SPACE_CATEGORIES,
   type GgufFile,
   type ModelSummary,
   type SpaceSummary,
@@ -62,14 +64,192 @@ function saveBoolPreference(key: string, value: boolean) {
 
 type BuildConsent = { proceed: boolean; useRepoDockerfile: boolean };
 
-function CardGridSkeleton() {
+function CardGridSkeleton({ count = 6 }: { count?: number }) {
   return (
     <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
-      {Array.from({ length: 6 }).map((_, i) => (
+      {Array.from({ length: count }).map((_, i) => (
         <Skeleton key={i} className="h-40 w-full" />
       ))}
     </div>
   );
+}
+
+type Page<T> = { items: T[]; next_cursor: string | null };
+
+type Feed<T> = {
+  items: T[];
+  cursor: string | null;
+  /** `loading` = first page (grid empty), `more` = appending, `end` = cursor exhausted */
+  state: "loading" | "more" | "idle" | "end" | "error";
+  error: string | null;
+};
+
+function emptyFeed<T>(): Feed<T> {
+  return { items: [], cursor: null, state: "loading", error: null };
+}
+
+/**
+ * A search result that grows page by page. `key` names the search (query +
+ * filter); when it changes while the tab is active the feed restarts from
+ * page one. `loadMore` appends the next page; the sentinel below calls it
+ * whenever the bottom of the grid scrolls into view.
+ */
+function usePagedFeed<T>(active: boolean, key: string, fetchPage: (cursor: string | null) => Promise<Page<T>>) {
+  const [feed, setFeed] = useState<Feed<T>>(emptyFeed);
+  const feedRef = useRef<Feed<T>>(emptyFeed());
+  const loadedKey = useRef<string | null>(null);
+  const requestId = useRef(0);
+  const [retryTick, setRetryTick] = useState(0);
+
+  function commit(next: Feed<T>) {
+    feedRef.current = next;
+    setFeed(next);
+  }
+
+  useEffect(() => {
+    if (!active || loadedKey.current === key) return;
+    loadedKey.current = key;
+    const id = ++requestId.current;
+    commit(emptyFeed());
+    fetchPage(null)
+      .then((page) => {
+        if (id !== requestId.current) return;
+        commit({
+          items: page.items,
+          cursor: page.next_cursor,
+          state: page.next_cursor ? "idle" : "end",
+          error: null,
+        });
+      })
+      .catch((e: unknown) => {
+        if (id !== requestId.current) return;
+        loadedKey.current = null;
+        commit({ ...feedRef.current, state: "error", error: String(e) });
+      });
+  }, [active, key, fetchPage, retryTick]);
+
+  const loadMore = useCallback(() => {
+    const current = feedRef.current;
+    if ((current.state !== "idle" && current.state !== "error") || !current.cursor) return;
+    const id = ++requestId.current;
+    commit({ ...current, state: "more", error: null });
+    fetchPage(current.cursor)
+      .then((page) => {
+        if (id !== requestId.current) return;
+        commit({
+          items: [...feedRef.current.items, ...page.items],
+          cursor: page.next_cursor,
+          state: page.next_cursor ? "idle" : "end",
+          error: null,
+        });
+      })
+      .catch((e: unknown) => {
+        if (id !== requestId.current) return;
+        commit({ ...feedRef.current, state: "error", error: String(e) });
+      });
+  }, [fetchPage]);
+
+  const retry = useCallback(() => {
+    if (feedRef.current.items.length === 0) setRetryTick((t) => t + 1);
+    else loadMore();
+  }, [loadMore]);
+
+  return { feed, loadMore, retry };
+}
+
+/**
+ * Sits under the grid; when it scrolls into view (or is already in view
+ * because the page is short) it asks for the next page. Re-armed on every
+ * change of `count` so a page that leaves the sentinel visible still fires.
+ */
+function LoadMoreSentinel({
+  enabled,
+  count,
+  onVisible,
+}: {
+  enabled: boolean;
+  count: number;
+  onVisible: () => void;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = ref.current;
+    if (!enabled || !el) return;
+    // Observe within the nearest scrolling ancestor so the margin prefetches
+    // a screen ahead inside the pane, not relative to the window.
+    let root: HTMLElement | null = el.parentElement;
+    while (root && !/(auto|scroll)/.test(getComputedStyle(root).overflowY)) root = root.parentElement;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((e) => e.isIntersecting)) onVisible();
+      },
+      { root, rootMargin: "600px 0px" },
+    );
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [enabled, count, onVisible]);
+  return <div ref={ref} className="h-px" aria-hidden />;
+}
+
+function FilterChips({
+  options,
+  value,
+  onChange,
+}: {
+  options: { slug: string; label: string }[];
+  value: string | null;
+  onChange: (slug: string | null) => void;
+}) {
+  const chip = (slug: string | null, label: string) => (
+    <button
+      key={slug ?? "all"}
+      type="button"
+      onClick={() => onChange(slug)}
+      className={cn(
+        "rounded-full border px-2.5 py-1 text-xs transition-colors",
+        value === slug
+          ? "border-foreground bg-foreground text-background"
+          : "border-border text-muted-foreground hover:bg-muted hover:text-foreground",
+      )}
+    >
+      {label}
+    </button>
+  );
+  return (
+    <div className="flex flex-wrap gap-1.5">
+      {chip(null, "All")}
+      {options.map((o) => chip(o.slug, o.label))}
+    </div>
+  );
+}
+
+function FeedFooter<T>({
+  feed,
+  noun,
+  onRetry,
+}: {
+  feed: Feed<T>;
+  noun: string;
+  onRetry: () => void;
+}) {
+  if (feed.state === "more") return <CardGridSkeleton count={3} />;
+  if (feed.state === "error" && feed.items.length > 0) {
+    return (
+      <Alert variant="destructive">
+        <AlertTitle>Could not load more {noun}</AlertTitle>
+        <AlertDescription className="flex items-center gap-3">
+          <span className="min-w-0 flex-1 truncate">{feed.error}</span>
+          <Button size="sm" variant="outline" onClick={onRetry}>
+            Retry
+          </Button>
+        </AlertDescription>
+      </Alert>
+    );
+  }
+  if (feed.state === "end" && feed.items.length > 0) {
+    return <p className="py-2 text-center text-xs text-muted-foreground">End of results</p>;
+  }
+  return null;
 }
 
 function FitBadge({ fits }: { fits: GgufFile["fits"] }) {
@@ -88,22 +268,39 @@ function pickDefaultFile(files: GgufFile[]): GgufFile | null {
   return null;
 }
 
-export function Browse({ onLaunched }: { onLaunched: () => void }) {
+export function Store({ onLaunched }: { onLaunched: () => void }) {
   const [query, setQuery] = useState("");
   const [debouncedQuery, setDebouncedQuery] = useState("");
   const [tab, setTab] = useState<"apps" | "models">("apps");
+  const [category, setCategory] = useState<string | null>(null);
+  const [pipeline, setPipeline] = useState<string | null>(null);
 
-  const [spaces, setSpaces] = useState<SpaceSummary[]>([]);
-  const [spacesState, setSpacesState] = useState<LoadState>("loading");
-
-  const [models, setModels] = useState<ModelSummary[]>([]);
-  const [modelsState, setModelsState] = useState<LoadState>("loading");
+  // Each tab is a feed keyed by its own search; the other tab's search stays
+  // lazy until the user selects it (#67).
+  const fetchSpaces = useCallback(
+    (cursor: string | null) => searchSpaces(debouncedQuery, { category, cursor }),
+    [debouncedQuery, category],
+  );
+  const fetchModels = useCallback(
+    (cursor: string | null) => searchModels(debouncedQuery, { pipeline, cursor }),
+    [debouncedQuery, pipeline],
+  );
+  const spacesFeed = usePagedFeed<SpaceSummary>(
+    tab === "apps",
+    `${debouncedQuery} ${category ?? ""}`,
+    fetchSpaces,
+  );
+  const modelsFeed = usePagedFeed<ModelSummary>(
+    tab === "models",
+    `${debouncedQuery} ${pipeline ?? ""}`,
+    fetchModels,
+  );
+  const spaces = spacesFeed.feed.items;
+  const models = modelsFeed.feed.items;
 
   const [launchingId, setLaunchingId] = useState<string | null>(null);
   const [buildingId, setBuildingId] = useState<string | null>(null);
   const [launchError, setLaunchError] = useState<string | null>(null);
-  const [spacesError, setSpacesError] = useState<string | null>(null);
-  const [modelsError, setModelsError] = useState<string | null>(null);
 
   const [dialogModel, setDialogModel] = useState<ModelSummary | null>(null);
   const [files, setFiles] = useState<GgufFile[]>([]);
@@ -117,58 +314,10 @@ export function Browse({ onLaunched }: { onLaunched: () => void }) {
   const [consentDontAskAgain, setConsentDontAskAgain] = useState(false);
   const buildConsentResolve = useRef<((choice: BuildConsent) => void) | null>(null);
 
-  // Which query each tab last fetched (or is fetching); `null` means never.
-  // Comparing against `debouncedQuery` is what makes the other tab's search
-  // lazy: it only runs once the user actually selects it (#67).
-  const [spacesQuery, setSpacesQuery] = useState<string | null>(null);
-  const [modelsQuery, setModelsQuery] = useState<string | null>(null);
-
   useEffect(() => {
     const t = setTimeout(() => setDebouncedQuery(query), 400);
     return () => clearTimeout(t);
   }, [query]);
-
-  useEffect(() => {
-    if (tab !== "apps" || spacesQuery === debouncedQuery) return;
-    let cancelled = false;
-    setSpacesState("loading");
-    searchSpaces(debouncedQuery)
-      .then((res) => {
-        if (cancelled) return;
-        setSpaces(res);
-        setSpacesState("idle");
-        setSpacesQuery(debouncedQuery);
-      })
-      .catch((e: unknown) => {
-        if (cancelled) return;
-        setSpacesError(String(e));
-        setSpacesState("error");
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [tab, debouncedQuery, spacesQuery]);
-
-  useEffect(() => {
-    if (tab !== "models" || modelsQuery === debouncedQuery) return;
-    let cancelled = false;
-    setModelsState("loading");
-    searchModels(debouncedQuery)
-      .then((res) => {
-        if (cancelled) return;
-        setModels(res);
-        setModelsState("idle");
-        setModelsQuery(debouncedQuery);
-      })
-      .catch((e: unknown) => {
-        if (cancelled) return;
-        setModelsError(String(e));
-        setModelsState("error");
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [tab, debouncedQuery, modelsQuery]);
 
   useEffect(() => {
     if (!dialogModel) return;
@@ -325,11 +474,18 @@ export function Browse({ onLaunched }: { onLaunched: () => void }) {
   return (
     <div className="flex flex-col gap-4 p-6">
       {gpuDialog}
+      <div>
+        <h1 className="font-heading text-lg font-medium">Store</h1>
+        <p className="text-sm text-muted-foreground">
+          Apps (Hugging Face Spaces) and chat models (GGUF) that run on this machine.
+        </p>
+      </div>
+
       <Input
         value={query}
         onChange={(e) => setQuery(e.target.value)}
         onKeyDown={handleSearchKeyDown}
-        placeholder="Search Hugging Face..."
+        placeholder="Search Hugging Face apps and models..."
         className="max-w-sm"
       />
 
@@ -346,18 +502,26 @@ export function Browse({ onLaunched }: { onLaunched: () => void }) {
           <TabsTrigger value="models">Models</TabsTrigger>
         </TabsList>
 
-        <TabsContent value="apps" className="mt-4">
-          {spacesState === "loading" && <CardGridSkeleton />}
-          {spacesState === "error" && (
+        <TabsContent value="apps" className="mt-4 flex flex-col gap-4">
+          <FilterChips options={SPACE_CATEGORIES} value={category} onChange={setCategory} />
+          {spacesFeed.feed.state === "loading" && <CardGridSkeleton />}
+          {spacesFeed.feed.state === "error" && spaces.length === 0 && (
             <Alert variant="destructive">
               <AlertTitle>Could not load apps</AlertTitle>
-              <AlertDescription>{spacesError ?? "Search Hugging Face Spaces failed. Try again."}</AlertDescription>
+              <AlertDescription className="flex items-center gap-3">
+                <span className="min-w-0 flex-1 truncate">
+                  {spacesFeed.feed.error ?? "Search Hugging Face Spaces failed."}
+                </span>
+                <Button size="sm" variant="outline" onClick={spacesFeed.retry}>
+                  Retry
+                </Button>
+              </AlertDescription>
             </Alert>
           )}
-          {spacesState === "idle" && spaces.length === 0 && (
-            <p className="text-sm text-muted-foreground">No apps found.</p>
+          {spacesFeed.feed.state === "end" && spaces.length === 0 && (
+            <p className="text-sm text-muted-foreground">No apps match this search.</p>
           )}
-          {spacesState === "idle" && spaces.length > 0 && (
+          {spaces.length > 0 && (
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
               {spaces.map((space) => (
                 <Card key={space.id}>
@@ -379,9 +543,15 @@ export function Browse({ onLaunched }: { onLaunched: () => void }) {
                     </CardAction>
                   </CardHeader>
                   <CardContent className="flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
+                    {space.description && (
+                      <p className="line-clamp-2 w-full text-sm text-foreground/80" title={space.description}>
+                        {space.description}
+                      </p>
+                    )}
+                    {space.category && <Badge variant="secondary">{space.category}</Badge>}
                     {space.sdk && <Badge variant="outline">{space.sdk}</Badge>}
                     <span>{formatCount(space.likes)} likes</span>
-                    {space.hardware && <span>{space.hardware}</span>}
+                    {space.hardware && <span title="Hardware tier the Space asks for on Hugging Face">{space.hardware}</span>}
                     {space.secrets.length > 0 && (
                       <span className="w-full text-amber-600 dark:text-amber-500">
                         Needs secrets: {space.secrets.join(", ")}
@@ -424,20 +594,34 @@ export function Browse({ onLaunched }: { onLaunched: () => void }) {
               ))}
             </div>
           )}
+          <FeedFooter feed={spacesFeed.feed} noun="apps" onRetry={spacesFeed.retry} />
+          <LoadMoreSentinel
+            enabled={tab === "apps" && spacesFeed.feed.state === "idle"}
+            count={spaces.length}
+            onVisible={spacesFeed.loadMore}
+          />
         </TabsContent>
 
-        <TabsContent value="models" className="mt-4">
-          {modelsState === "loading" && <CardGridSkeleton />}
-          {modelsState === "error" && (
+        <TabsContent value="models" className="mt-4 flex flex-col gap-4">
+          <FilterChips options={MODEL_PIPELINES} value={pipeline} onChange={setPipeline} />
+          {modelsFeed.feed.state === "loading" && <CardGridSkeleton />}
+          {modelsFeed.feed.state === "error" && models.length === 0 && (
             <Alert variant="destructive">
               <AlertTitle>Could not load models</AlertTitle>
-              <AlertDescription>{modelsError ?? "Search Hugging Face models failed. Try again."}</AlertDescription>
+              <AlertDescription className="flex items-center gap-3">
+                <span className="min-w-0 flex-1 truncate">
+                  {modelsFeed.feed.error ?? "Search Hugging Face models failed."}
+                </span>
+                <Button size="sm" variant="outline" onClick={modelsFeed.retry}>
+                  Retry
+                </Button>
+              </AlertDescription>
             </Alert>
           )}
-          {modelsState === "idle" && models.length === 0 && (
-            <p className="text-sm text-muted-foreground">No models found.</p>
+          {modelsFeed.feed.state === "end" && models.length === 0 && (
+            <p className="text-sm text-muted-foreground">No models match this search.</p>
           )}
-          {modelsState === "idle" && models.length > 0 && (
+          {models.length > 0 && (
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
               {models.map((model) => (
                 <Card key={model.id}>
@@ -469,6 +653,12 @@ export function Browse({ onLaunched }: { onLaunched: () => void }) {
               ))}
             </div>
           )}
+          <FeedFooter feed={modelsFeed.feed} noun="models" onRetry={modelsFeed.retry} />
+          <LoadMoreSentinel
+            enabled={tab === "models" && modelsFeed.feed.state === "idle"}
+            count={models.length}
+            onVisible={modelsFeed.loadMore}
+          />
         </TabsContent>
       </Tabs>
 

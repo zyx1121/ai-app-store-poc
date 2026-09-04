@@ -6,7 +6,7 @@ use std::time::Instant;
 use tokio::process::Child;
 
 use crate::hardware::Vendor;
-use crate::hf::SpaceSummary;
+use crate::hf::{RawSpace, SpaceSummary};
 use crate::instances::Instance;
 use crate::runtime::RuntimeStatus;
 use crate::services::{ServiceId, ServiceStatus};
@@ -37,8 +37,11 @@ pub struct AppState {
     pub instance_launches: Mutex<HashMap<String, Arc<AtomicBool>>>,
     /// Same as `instance_launches`, keyed by service id (#35).
     pub service_launches: Mutex<HashMap<ServiceId, Arc<AtomicBool>>>,
-    /// Browse Space search cache, keyed by repo id, for the life of the session (#67).
+    /// Store Space search cache, keyed by repo id, for the life of the session (#67).
     pub space_cache: Mutex<HashMap<String, (SpaceSummary, Instant)>>,
+    /// Whole semantic search answers keyed by `query\0category`; the Store
+    /// pages through them locally since the Hub does not.
+    pub semantic_cache: Mutex<HashMap<String, (Vec<RawSpace>, Instant)>>,
     /// Bumped on every Space search; a spawned detail fetch aborts once this
     /// no longer matches the generation it started with (#67).
     pub search_generation: AtomicU64,
@@ -82,6 +85,7 @@ impl Default for AppState {
             instance_launches: Mutex::new(HashMap::new()),
             service_launches: Mutex::new(HashMap::new()),
             space_cache: Mutex::new(HashMap::new()),
+            semantic_cache: Mutex::new(HashMap::new()),
             search_generation: AtomicU64::new(0),
             hf_token: Mutex::new(None),
             comfyui_freed: Mutex::new(false),
