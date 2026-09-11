@@ -1,13 +1,14 @@
 {
   "name": "ai-app-store-poc",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "bump": "bun scripts/bump-version.mjs"
   },
   "dependencies": {
     "@ai-sdk/openai-compatible": "^3.0.37",

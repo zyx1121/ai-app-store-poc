@@ -1,5 +1,6 @@
 import { Fragment, useEffect, useRef, useState } from "react";
 import {
+  APP_COMMIT,
   APP_VERSION,
   checkForUpdate,
   hfTokenStatus,
@@ -230,7 +231,9 @@ function UpdateCard() {
     <div className="flex flex-col gap-3 rounded-xl border border-border p-3">
       <div className="flex items-center gap-2">
         <span className="flex-1 text-sm font-medium">Update</span>
-        <span className="text-xs text-muted-foreground">v{APP_VERSION}</span>
+        <span className="text-xs text-muted-foreground">
+          v{APP_VERSION} <span className="font-mono">{APP_COMMIT}</span>
+        </span>
       </div>
 
       {checkError && (

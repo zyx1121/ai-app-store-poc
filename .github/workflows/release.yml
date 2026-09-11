@@ -1,10 +1,15 @@
 name: release
 
-# Tag v* -> signed MSI + .sig + latest.json on a GitHub Release. The app's
+# A version bump merged into main (`bun run bump X.Y.Z`) tags vX.Y.Z and
+# publishes the signed MSI + .sig + latest.json as a GitHub Release. The app's
 # updater reads latest.json from the "latest" release of this repository.
+# Pushing a v* tag by hand still works and builds that tag.
 on:
   push:
+    branches: [main]
+    paths: [src-tauri/tauri.conf.json]
     tags: ["v*"]
+  workflow_dispatch:
 
 jobs:
   windows:
@@ -14,27 +19,50 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: oven-sh/setup-bun@v2
+      # Skip when main changed tauri.conf.json without bumping the version
+      # (the tag for the current version already exists).
+      - id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(jq -r .version src-tauri/tauri.conf.json)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [[ "$GITHUB_REF" == refs/tags/* && "$GITHUB_REF_NAME" != "v$version" ]]; then
+            echo "tag $GITHUB_REF_NAME does not match version $version" >&2
+            exit 1
+          fi
+          if [[ "$GITHUB_REF" != refs/tags/* ]] && git ls-remote --exit-code --tags origin "refs/tags/v$version" >/dev/null; then
+            echo "v$version already released, nothing to do"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
 
-      - uses: dtolnay/rust-toolchain@stable
+      - if: steps.version.outputs.skip != 'true'
+        uses: oven-sh/setup-bun@v2
 
-      - uses: Swatinem/rust-cache@v2
+      - if: steps.version.outputs.skip != 'true'
+        uses: dtolnay/rust-toolchain@stable
+
+      - if: steps.version.outputs.skip != 'true'
+        uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
 
-      - run: bun install --frozen-lockfile
+      - if: steps.version.outputs.skip != 'true'
+        run: bun install --frozen-lockfile
 
-      # Builds the MSI, signs it with the updater key, and publishes the release
-      # with latest.json. The private key is the TAURI_SIGNING_PRIVATE_KEY secret
-      # (generated once with `tauri signer generate`; public half in tauri.conf.json).
-      - uses: tauri-apps/tauri-action@v0
+      # Builds the MSI, signs it with the updater key, creates the tag when it
+      # does not exist yet, and publishes the release with latest.json. The
+      # private key is the TAURI_SIGNING_PRIVATE_KEY secret (generated once with
+      # `tauri signer generate`; public half in tauri.conf.json).
+      - if: steps.version.outputs.skip != 'true'
+        uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: AI App Store ${{ github.ref_name }}
+          tagName: v${{ steps.version.outputs.version }}
+          releaseName: AI App Store v${{ steps.version.outputs.version }}
           releaseBody: See the commit log for changes.
           releaseDraft: false
           prerelease: false

@@ -546,6 +546,8 @@ export type AvailableUpdate = {
 };
 
 export const APP_VERSION = __APP_VERSION__;
+/** Short git hash of the build; tells apart builds that share a version. */
+export const APP_COMMIT = __APP_COMMIT__;
 
 let pendingUpdate: Awaited<ReturnType<typeof checkUpdate>> = null;
 
