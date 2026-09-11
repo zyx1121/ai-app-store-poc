@@ -89,7 +89,7 @@ function App() {
             )}
             {mounted("store") && (
               <div className={paneClass("store")}>
-                <Store onLaunched={() => setRoute("running")} />
+                <Store />
               </div>
             )}
             {mounted("running") && (

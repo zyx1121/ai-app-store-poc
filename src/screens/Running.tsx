@@ -1,17 +1,22 @@
 import { useEffect, useState } from "react";
-import { ChevronDown } from "lucide-react";
 import {
+  buildSpace,
+  launchModel,
   launchSpace,
-  listInstances,
+  listLibrary,
+  modelFiles,
   onInstanceUpdate,
+  onLibraryUpdate,
   openUrl,
   removeInstance,
+  spaceSummary,
   stopInstance,
-  type Instance,
+  type LibraryItem,
+  type SpaceSummary,
 } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Textarea } from "@/components/ui/textarea";
+import { Input } from "@/components/ui/input";
 import {
   Card,
   CardContent,
@@ -20,262 +25,464 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { StatusBadge } from "@/components/StatusBadge";
 import { LogTail } from "@/components/LogTail";
 import { GpuMemoryCard } from "@/components/GpuMemoryCard";
+import { useGpuGate } from "@/components/GpuGate";
 
-const LIVE_STATUSES: Instance["status"][] = ["pulling", "building", "starting", "running", "error"];
+const BUILD_DONT_ASK_KEY = "buildLocally.dontAskAgain";
+const BUILD_USE_REPO_DOCKERFILE_KEY = "buildLocally.useRepoDockerfile";
 
-/**
- * Merge an update into the list. A relaunch of the same repo starts a fresh
- * instance with a new id; drop any stopped card for that repo so the old one
- * does not pile up next to the new run.
- */
-function upsert(list: Instance[], next: Instance): Instance[] {
-  const withoutStaleStopped = list.filter(
-    (i) =>
-      i.id === next.id ||
-      !(i.repo === next.repo && i.kind === next.kind && i.status === "stopped" && next.status !== "stopped"),
-  );
-  const idx = withoutStaleStopped.findIndex((i) => i.id === next.id);
-  if (idx === -1) return [next, ...withoutStaleStopped];
-  const copy = withoutStaleStopped.slice();
-  copy[idx] = next;
-  return copy;
-}
-
-/** `NAME=value` per line, one env var each; parsing is forgiving (blank lines,
- * no `=`, are just skipped) since this is a small manual retry form, not a form
- * with per-field validation (#57). */
-function parseEnvLines(text: string): Record<string, string> {
-  const env: Record<string, string> = {};
-  for (const line of text.split("\n")) {
-    const idx = line.indexOf("=");
-    if (idx <= 0) continue;
-    const name = line.slice(0, idx).trim();
-    const value = line.slice(idx + 1).trim();
-    if (name) env[name] = value;
+function loadBoolPreference(key: string): boolean {
+  try {
+    return localStorage.getItem(key) === "true";
+  } catch {
+    return false;
   }
-  return env;
 }
 
-/** A Space that failed to launch (missing secret, gated model without a
- * token) can be retried here with corrected values, without going back to
- * the Store (#57). */
-function EnvRetry({ onRetry }: { onRetry: (env: Record<string, string>) => void }) {
-  const [text, setText] = useState("");
-  const [retrying, setRetrying] = useState(false);
-
-  async function submit() {
-    setRetrying(true);
-    try {
-      await onRetry(parseEnvLines(text));
-    } finally {
-      setRetrying(false);
-    }
+function saveBoolPreference(key: string, value: boolean) {
+  try {
+    localStorage.setItem(key, String(value));
+  } catch {
+    // ignore (private browsing, storage disabled, ...)
   }
-
-  return (
-    <div className="flex flex-col gap-1.5 rounded-lg border border-border p-2">
-      <label className="text-xs text-muted-foreground">Secrets, one NAME=value per line</label>
-      <Textarea
-        value={text}
-        onChange={(e) => setText(e.target.value)}
-        rows={2}
-        className="font-mono text-xs"
-        placeholder="tryon_url=https://..."
-      />
-      <Button size="sm" variant="outline" onClick={submit} disabled={retrying} className="self-start">
-        {retrying ? "Retrying..." : "Retry with these values"}
-      </Button>
-    </div>
-  );
 }
 
-function InstanceCard({
-  instance,
-  onOpenChat,
+type BuildConsent = { proceed: boolean; useRepoDockerfile: boolean };
+
+/** How a Space is started: from the Hub's image, or from one built here. */
+type RunKind = "run" | "build";
+
+/** The name Ollama knows the model by; mirrors `model_tag` in instances.rs. */
+function modelTag(item: LibraryItem): string {
+  const quant = item.quant ?? "";
+  return item.repo.includes("/") ? `hf.co/${item.repo}:${quant}` : `${item.repo}:${quant}`;
+}
+
+/** Spaces on a GPU tier hold VRAM of their own; CPU tiers run without asking. */
+function spaceWantsGpu(space: SpaceSummary): boolean {
+  return !!space.hardware && !space.hardware.startsWith("cpu");
+}
+
+function ItemCard({
+  item,
+  busy,
+  onRun,
+  onBuild,
   onStop,
+  onOpenChat,
   onRemove,
-  onRetry,
 }: {
-  instance: Instance;
-  onOpenChat: (instanceId: string) => void;
+  item: LibraryItem;
+  busy: boolean;
+  onRun: (item: LibraryItem) => void;
+  onBuild: (item: LibraryItem) => void;
   onStop: (id: string) => void;
-  onRemove: (id: string) => void;
-  onRetry: (repo: string, env: Record<string, string>) => void;
+  onOpenChat: (instanceId: string) => void;
+  onRemove: (item: LibraryItem) => void;
 }) {
-  const canOpen = instance.kind === "space" && instance.status === "running" && instance.url;
-  const canChat = instance.kind === "model" && instance.status === "running";
-  const canStop = instance.status !== "stopped";
-  const canRemove = instance.status === "stopped" || instance.status === "error";
-  const canRetry = instance.kind === "space" && instance.status === "error";
+  const live = item.status !== "stopped";
+  const canOpen = item.kind === "space" && item.status === "running" && item.url;
+  const canChat = item.kind === "model" && item.status === "running";
 
   return (
     <Card>
       <CardHeader>
         <CardTitle className="flex items-center gap-2">
-          <Badge variant="outline">{instance.kind}</Badge>
-          <span className="truncate">{instance.display_name}</span>
+          <Badge variant="outline">{item.kind}</Badge>
+          <span className="truncate">{item.display_name}</span>
         </CardTitle>
-        <CardDescription>{instance.repo}</CardDescription>
+        <CardDescription>
+          {item.repo}
+          {item.quant && ` (${item.quant})`}
+        </CardDescription>
       </CardHeader>
       <CardContent className="flex flex-col gap-2">
         <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-          <StatusBadge status={instance.status} />
-          {instance.local_build && <Badge variant="outline">Built locally</Badge>}
-          {instance.port && <span>port {instance.port}</span>}
-          {instance.url && <span className="truncate">{instance.url}</span>}
-          {instance.status === "pulling" && instance.pull_size_mb !== null && (
-            <span>{(instance.pull_size_mb / 1024).toFixed(1)} GB image</span>
+          <StatusBadge status={item.status} />
+          {item.local_build && <Badge variant="outline">Built locally</Badge>}
+          {item.port && <span>port {item.port}</span>}
+          {item.url && <span className="truncate">{item.url}</span>}
+          {item.status === "pulling" && item.pull_size_mb !== null && (
+            <span>{(item.pull_size_mb / 1024).toFixed(1)} GB image</span>
           )}
-          {instance.status === "pulling" && instance.progress_pct !== null && (
+          {item.status === "pulling" && item.progress_pct !== null && (
             <span className="flex min-w-24 flex-1 items-center gap-1.5">
               <span className="h-1 flex-1 overflow-hidden rounded-full bg-muted">
                 <span
                   className="block h-full rounded-full bg-primary transition-[width]"
-                  style={{ width: `${instance.progress_pct}%` }}
+                  style={{ width: `${item.progress_pct}%` }}
                 />
               </span>
-              {instance.progress_pct}%
+              {item.progress_pct}%
             </span>
           )}
         </div>
-        {instance.error && <p className="text-xs text-destructive">{instance.error}</p>}
-        <LogTail lines={instance.log_tail} />
-        {canRetry && <EnvRetry onRetry={(env) => onRetry(instance.repo, env)} />}
+        {item.error && <p className="text-xs text-destructive">{item.error}</p>}
+        {item.log_tail.length > 0 && <LogTail lines={item.log_tail} />}
       </CardContent>
       <CardFooter className="flex gap-2">
+        {!live && (
+          <Button disabled={busy} onClick={() => onRun(item)}>
+            Run
+          </Button>
+        )}
+        {!live && item.kind === "space" && (
+          <Button variant="outline" disabled={busy} onClick={() => onBuild(item)}>
+            Build locally
+          </Button>
+        )}
         {canOpen && (
-          <Button variant="outline" onClick={() => openUrl(instance.url!)}>
+          <Button variant="outline" onClick={() => openUrl(item.url!)}>
             Open
           </Button>
         )}
-        {canChat && <Button onClick={() => onOpenChat(instance.id)}>Chat</Button>}
-        {canStop && (
-          <Button variant="outline" onClick={() => onStop(instance.id)}>
+        {canChat && <Button onClick={() => onOpenChat(item.id)}>Chat</Button>}
+        {live && (
+          <Button variant="outline" disabled={busy} onClick={() => onStop(item.id)}>
             Stop
           </Button>
         )}
-        {canRemove && (
-          <Button variant="destructive" onClick={() => onRemove(instance.id)}>
-            Remove
-          </Button>
-        )}
+        <Button
+          variant="destructive"
+          className="ml-auto"
+          disabled={busy}
+          onClick={() => onRemove(item)}
+        >
+          Remove
+        </Button>
       </CardFooter>
     </Card>
   );
 }
 
 export function Running({ onOpenChat }: { onOpenChat: (instanceId: string) => void }) {
-  const [instances, setInstances] = useState<Instance[]>([]);
+  const [items, setItems] = useState<LibraryItem[]>([]);
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const { gate, dialog: gpuDialog } = useGpuGate();
+
+  // A Space that reads secrets from its environment collects them here, right
+  // before the launch that needs them (#57).
+  const [secretsFor, setSecretsFor] = useState<{
+    item: LibraryItem;
+    space: SpaceSummary;
+    kind: RunKind;
+  } | null>(null);
+  const [secretValues, setSecretValues] = useState<Record<string, string>>({});
+
+  // Build locally runs code from the Space's own repository; ask once.
+  const [consentOpen, setConsentOpen] = useState(false);
+  const [consentUseRepoDockerfile, setConsentUseRepoDockerfile] = useState(false);
+  const [consentDontAskAgain, setConsentDontAskAgain] = useState(false);
+  const [consentResolve, setConsentResolve] = useState<((c: BuildConsent) => void) | null>(null);
+
+  const [removeTarget, setRemoveTarget] = useState<LibraryItem | null>(null);
 
   useEffect(() => {
     let cancelled = false;
-    listInstances().then((res) => {
-      if (!cancelled) setInstances(res);
+    listLibrary().then((res) => {
+      if (!cancelled) setItems(res);
     });
 
-    let unlisten: (() => void) | undefined;
-    onInstanceUpdate((instance) => {
-      setInstances((prev) => upsert(prev, instance));
-    }).then((fn) => {
+    const unlisteners: (() => void)[] = [];
+    const track = (fn: () => void) => {
       if (cancelled) fn();
-      else unlisten = fn;
-    });
+      else unlisteners.push(fn);
+    };
+    // The library event carries the whole list (an add or a remove); instance
+    // updates carry status and log lines for one item already in it.
+    onLibraryUpdate((next) => setItems(next)).then(track);
+    onInstanceUpdate((instance) => {
+      setItems((prev) =>
+        prev.map((item) =>
+          item.id === instance.id
+            ? {
+                ...item,
+                display_name: instance.display_name,
+                status: instance.status,
+                model_tag: instance.model_tag,
+                port: instance.port,
+                url: instance.url,
+                error: instance.error,
+                log_tail: instance.log_tail,
+                local_build: instance.local_build,
+                gpu: instance.gpu,
+                pull_size_mb: instance.pull_size_mb,
+                progress_pct: instance.progress_pct,
+              }
+            : item,
+        ),
+      );
+    }).then(track);
 
     return () => {
       cancelled = true;
-      unlisten?.();
+      for (const fn of unlisteners) fn();
     };
   }, []);
 
-  async function handleStop(id: string) {
-    await stopInstance(id);
+  function confirmBuildLocally(): Promise<BuildConsent> {
+    if (loadBoolPreference(BUILD_DONT_ASK_KEY)) {
+      return Promise.resolve({
+        proceed: true,
+        useRepoDockerfile: loadBoolPreference(BUILD_USE_REPO_DOCKERFILE_KEY),
+      });
+    }
+    return new Promise<BuildConsent>((resolve) => {
+      setConsentUseRepoDockerfile(false);
+      setConsentDontAskAgain(false);
+      setConsentResolve(() => resolve);
+      setConsentOpen(true);
+    });
   }
 
-  async function handleRemove(id: string) {
-    await removeInstance(id);
-    setInstances((prev) => prev.filter((i) => i.id !== id));
+  function finishBuildConsent(proceed: boolean) {
+    setConsentOpen(false);
+    if (proceed && consentDontAskAgain) {
+      saveBoolPreference(BUILD_DONT_ASK_KEY, true);
+      saveBoolPreference(BUILD_USE_REPO_DOCKERFILE_KEY, consentUseRepoDockerfile);
+    }
+    consentResolve?.({ proceed, useRepoDockerfile: consentUseRepoDockerfile });
+    setConsentResolve(null);
   }
 
-  async function handleRemoveAll(ids: string[]) {
-    await Promise.all(ids.map((id) => removeInstance(id)));
-    setInstances((prev) => prev.filter((i) => !ids.includes(i.id)));
+  /** Gate the GPU, then pull (or build) and start. Everything a launch needs
+   * that the library entry does not carry comes from the Hub here. */
+  async function launchSpaceItem(space: SpaceSummary, kind: RunKind, env: Record<string, string>) {
+    let leaseId: string | null = null;
+    if (spaceWantsGpu(space)) {
+      const result = await gate({ kind: "space", id: space.id }, space.title ?? space.name);
+      if (!result.proceed) return;
+      leaseId = result.leaseId;
+    }
+    if (kind === "build") {
+      const { proceed, useRepoDockerfile } = await confirmBuildLocally();
+      if (!proceed) return;
+      await buildSpace(space.id, useRepoDockerfile, env, leaseId);
+    } else {
+      await launchSpace(space.id, env, leaseId);
+    }
   }
 
-  /** Relaunches the same repo with the env values the user just supplied
-   * (#57); the instance update event refreshes this card as usual. */
-  async function handleRetry(repo: string, env: Record<string, string>) {
-    await launchSpace(repo, env);
-  }
-
-  if (instances.length === 0) {
-    return (
-      <div className="flex flex-col gap-3 p-6">
-        <GpuMemoryCard />
-        <p className="text-sm text-muted-foreground">Nothing running</p>
-      </div>
+  async function launchModelItem(item: LibraryItem) {
+    // The GPU plan is only as good as the size it is given; the file list is
+    // where the quant's size comes from (a bare Ollama name has none).
+    const sizeBytes = await modelFiles(item.repo)
+      .then((files) => files.find((f) => f.quant === item.quant)?.size_bytes ?? null)
+      .catch(() => null);
+    const result = await gate(
+      { kind: "model", tag: modelTag(item), size_bytes: sizeBytes },
+      item.display_name,
     );
+    if (!result.proceed) return;
+    await launchModel(item.repo, item.quant ?? "", result.leaseId);
   }
 
-  const live = instances.filter((i) => LIVE_STATUSES.includes(i.status));
-  const stopped = instances.filter((i) => i.status === "stopped");
+  async function handleRun(item: LibraryItem, kind: RunKind = "run") {
+    setError(null);
+    setBusyId(item.id);
+    try {
+      if (item.kind === "model") {
+        await launchModelItem(item);
+        return;
+      }
+      const space = await spaceSummary(item.repo);
+      if (space.secrets.length > 0) {
+        setSecretValues(Object.fromEntries(space.secrets.map((name) => [name, ""])));
+        setSecretsFor({ item, space, kind });
+        return;
+      }
+      await launchSpaceItem(space, kind, {});
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function confirmSecrets() {
+    const pending = secretsFor;
+    if (!pending) return;
+    setSecretsFor(null);
+    setError(null);
+    setBusyId(pending.item.id);
+    try {
+      await launchSpaceItem(pending.space, pending.kind, secretValues);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function handleStop(id: string) {
+    setError(null);
+    setBusyId(id);
+    try {
+      await stopInstance(id);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function confirmRemove() {
+    const target = removeTarget;
+    if (!target) return;
+    setRemoveTarget(null);
+    setError(null);
+    setBusyId(target.id);
+    try {
+      await removeInstance(target.id);
+      setItems((prev) => prev.filter((i) => i.id !== target.id));
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusyId(null);
+    }
+  }
 
   return (
     <div className="flex flex-col gap-3 p-6">
+      {gpuDialog}
       <GpuMemoryCard />
-      {live.length === 0 && (
-        <p className="text-sm text-muted-foreground">Nothing running</p>
+
+      {error && <p className="text-sm text-destructive">{error}</p>}
+
+      {items.length === 0 && (
+        <p className="text-sm text-muted-foreground">Nothing added yet</p>
       )}
-      {live.map((instance) => (
-        <InstanceCard
-          key={instance.id}
-          instance={instance}
-          onOpenChat={onOpenChat}
+
+      {items.map((item) => (
+        <ItemCard
+          key={item.id}
+          item={item}
+          busy={busyId === item.id}
+          onRun={(i) => handleRun(i, "run")}
+          onBuild={(i) => handleRun(i, "build")}
           onStop={handleStop}
-          onRemove={handleRemove}
-          onRetry={handleRetry}
+          onOpenChat={onOpenChat}
+          onRemove={setRemoveTarget}
         />
       ))}
 
-      {stopped.length > 0 && (
-        <Collapsible className="flex flex-col gap-3 rounded-xl border border-border p-3">
-          <div className="flex items-center gap-2">
-            <CollapsibleTrigger
-              render={
-                <button
-                  type="button"
-                  className="group flex flex-1 items-center gap-2 text-left text-sm font-medium"
+      <Dialog
+        open={secretsFor !== null}
+        onOpenChange={(open) => {
+          if (!open) setSecretsFor(null);
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>
+              Secrets for {secretsFor?.space.title ?? secretsFor?.space.name}
+            </DialogTitle>
+          </DialogHeader>
+
+          <div className="flex flex-col gap-2">
+            {secretsFor?.space.secrets.map((name) => (
+              <div key={name} className="flex flex-col gap-1">
+                <label
+                  className="text-xs font-medium text-muted-foreground"
+                  htmlFor={`secret-${name}`}
+                >
+                  {name}
+                </label>
+                <Input
+                  id={`secret-${name}`}
+                  type="password"
+                  value={secretValues[name] ?? ""}
+                  onChange={(e) =>
+                    setSecretValues((prev) => ({ ...prev, [name]: e.target.value }))
+                  }
                 />
-              }
-            >
-              <ChevronDown className="size-4 shrink-0 transition-transform group-data-[panel-open]:rotate-180" />
-              Recent ({stopped.length})
-            </CollapsibleTrigger>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => handleRemoveAll(stopped.map((i) => i.id))}
-            >
-              Remove all
-            </Button>
-          </div>
-          <CollapsibleContent className="flex flex-col gap-3">
-            {stopped.map((instance) => (
-              <InstanceCard
-                key={instance.id}
-                instance={instance}
-                onOpenChat={onOpenChat}
-                onStop={handleStop}
-                onRemove={handleRemove}
-                onRetry={handleRetry}
-              />
+              </div>
             ))}
-          </CollapsibleContent>
-        </Collapsible>
-      )}
+          </div>
+
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setSecretsFor(null)}>
+              Cancel
+            </Button>
+            <Button onClick={confirmSecrets}>
+              {secretsFor?.kind === "build" ? "Build locally" : "Run"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={consentOpen}
+        onOpenChange={(open) => {
+          if (!open) finishBuildConsent(false);
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Build locally?</DialogTitle>
+            <DialogDescription>
+              Build locally runs code from this app's repository on your PC. Continue?
+            </DialogDescription>
+          </DialogHeader>
+          <label className="flex items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              className="size-4 rounded border-input"
+              checked={consentUseRepoDockerfile}
+              onChange={(e) => setConsentUseRepoDockerfile(e.target.checked)}
+            />
+            Use the app's own Dockerfile (runs its `RUN` steps verbatim)
+          </label>
+          <label className="flex items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              className="size-4 rounded border-input"
+              checked={consentDontAskAgain}
+              onChange={(e) => setConsentDontAskAgain(e.target.checked)}
+            />
+            Don't ask again
+          </label>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => finishBuildConsent(false)}>
+              Cancel
+            </Button>
+            <Button onClick={() => finishBuildConsent(true)}>Continue</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={removeTarget !== null}
+        onOpenChange={(open) => {
+          if (!open) setRemoveTarget(null);
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Remove {removeTarget?.display_name}?</DialogTitle>
+            <DialogDescription>Downloaded files are deleted.</DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setRemoveTarget(null)}>
+              Cancel
+            </Button>
+            <Button variant="destructive" onClick={confirmRemove}>
+              Remove
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

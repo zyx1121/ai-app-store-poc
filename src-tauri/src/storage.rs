@@ -11,7 +11,7 @@ use tauri::{AppHandle, Emitter};
 
 use crate::build;
 use crate::error::Result;
-use crate::instances::{Instance, Kind, Status};
+use crate::instances::{Kind, Status};
 use crate::services::ServiceState;
 use crate::state::AppState;
 use crate::wsl::{self, DISTRO};
@@ -104,25 +104,40 @@ pub fn space_image(repo: &str, local_build: bool) -> String {
     }
 }
 
-/// Images still referenced by an instance that is pulling, building, starting
-/// or running. A stopped instance's image is fair game for cleanup.
-fn referenced_images(state: &AppState) -> HashSet<String> {
-    state
+/// Both images a library entry may run under. The entry records the repo, not
+/// how it was started, so a repo in the library keeps its Hub image and its
+/// local build; Remove is what makes them collectable.
+fn entry_images(repo: &str) -> [String; 2] {
+    [space_image(repo, false), space_image(repo, true)]
+}
+
+/// Images something still needs: a Space instance that is pulling, building,
+/// starting or running, or any Space in the library (added items keep their
+/// image so Run does not have to pull it again).
+///
+/// `None` when the state cannot be read: a poisoned lock must never lead to a
+/// destructive `docker rmi` (#63).
+fn referenced_images(state: &AppState) -> Option<HashSet<String>> {
+    let mut keep: HashSet<String> = state
         .instances
         .lock()
-        .map(|m| {
-            m.values()
-                .filter(|i| i.kind == Kind::Space)
-                .filter(|i| {
-                    matches!(
-                        i.status,
-                        Status::Pulling | Status::Building | Status::Starting | Status::Running
-                    )
-                })
-                .map(|i| space_image(&i.repo, i.local_build))
-                .collect()
+        .ok()?
+        .values()
+        .filter(|i| i.kind == Kind::Space)
+        .filter(|i| {
+            matches!(
+                i.status,
+                Status::Pulling | Status::Building | Status::Starting | Status::Running
+            )
         })
-        .unwrap_or_default()
+        .map(|i| space_image(&i.repo, i.local_build))
+        .collect();
+    for entry in state.library.lock().ok()?.iter() {
+        if entry.kind == Kind::Space {
+            keep.extend(entry_images(&entry.repo));
+        }
+    }
+    Some(keep)
 }
 
 /// Images present on disk that are not in `keep`; pure so it is unit-testable
@@ -151,27 +166,17 @@ async fn list_images(pattern: &str) -> Vec<String> {
     .unwrap_or_default()
 }
 
-/// After an instance is removed, drop its image if no other instance (any
-/// status) still references it. Only Space instances have an image; Ollama
-/// models live in Ollama's own store and are left alone.
-pub async fn maybe_remove_image(state: &AppState, removed: &Instance) {
-    if removed.kind != Kind::Space {
+/// After a Space is unsubscribed, drop its images unless another library
+/// entry or a live instance still references them. Call it once the entry is
+/// out of the library, or it keeps its own image alive. Ollama models are not
+/// images; `instances::remove` deletes those through `ollama rm`.
+pub async fn maybe_remove_image(state: &AppState, removed_repo: &str) {
+    let Some(keep) = referenced_images(state) else {
         return;
+    };
+    for image in images_to_remove(&entry_images(removed_repo), &keep) {
+        let _ = wsl::sh(&format!("docker rmi {image} >/dev/null 2>&1")).await;
     }
-    let image = space_image(&removed.repo, removed.local_build);
-    let still_used = state
-        .instances
-        .lock()
-        .map(|m| {
-            m.values()
-                .any(|i| i.kind == Kind::Space && space_image(&i.repo, i.local_build) == image)
-        })
-        // a poisoned lock must not trigger a destructive `docker rmi`
-        .unwrap_or(true);
-    if still_used {
-        return;
-    }
-    let _ = wsl::sh(&format!("docker rmi {image} >/dev/null 2>&1")).await;
 }
 
 async fn volume_size_mb(name: &str) -> u64 {
@@ -314,7 +319,9 @@ fn anything_running(state: &AppState) -> bool {
 }
 
 async fn remove_unused_space_images(state: &AppState) -> u32 {
-    let keep = referenced_images(state);
+    let Some(keep) = referenced_images(state) else {
+        return 0;
+    };
     let mut present = list_images("registry.hf.space/*").await;
     present.extend(list_images("aias-local/*").await);
     let mut removed = 0u32;
@@ -540,6 +547,25 @@ mod tests {
                 "registry.hf.space/c-d:latest".to_string(),
                 "aias-local/e-f:latest".to_string(),
             ]
+        );
+    }
+
+    /// A library entry keeps both names, since it does not record whether the
+    /// item was pulled from the Hub or built here.
+    #[test]
+    fn library_entry_reserves_both_image_names() {
+        assert_eq!(
+            entry_images("owner/name"),
+            [
+                "registry.hf.space/owner-name:latest".to_string(),
+                "aias-local/owner-name:latest".to_string(),
+            ]
+        );
+        let keep: HashSet<String> = entry_images("owner/name").into_iter().collect();
+        assert!(images_to_remove(&entry_images("owner/name"), &keep).is_empty());
+        assert_eq!(
+            images_to_remove(&entry_images("other/repo"), &keep).len(),
+            2
         );
     }
 

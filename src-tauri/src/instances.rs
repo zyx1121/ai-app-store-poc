@@ -14,6 +14,7 @@ use crate::build;
 use crate::error::{Error, Result};
 use crate::gpu;
 use crate::hf;
+use crate::library;
 use crate::ollama;
 use crate::state::AppState;
 use crate::storage;
@@ -99,6 +100,58 @@ fn now() -> String {
 
 fn container_name(id: &str) -> String {
     format!("{CONTAINER_PREFIX}{}", id.trim_start_matches("space-"))
+}
+
+/// Instance id of a Space. Also the id of its library entry, which is how the
+/// two join (see `library.rs`).
+pub fn space_instance_id(repo: &str) -> String {
+    format!("space-{}", slug(repo))
+}
+
+/// Instance id of one model at one quant; the same repo at another quant is a
+/// separate item.
+pub fn model_instance_id(repo: &str, quant: &str) -> String {
+    format!("model-{}", slug(&format!("{repo}-{quant}")))
+}
+
+/// The name Ollama knows a model by: `hf.co/<repo>:<quant>` for a Hugging Face
+/// GGUF repo, `<name>:<tag>` for a bare Ollama library model (`qwen2.5vl` +
+/// `7b`), which is how vision models ship. Both halves end up in a command
+/// line inside the distro, so both are validated here.
+pub fn model_tag(repo: &str, quant: &str) -> Result<String> {
+    let plain = |s: &str| {
+        !s.is_empty()
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+    };
+    if !plain(quant) {
+        return Err(Error::Other(format!("`{quant}` is not a model tag")));
+    }
+    if repo.contains('/') {
+        hf::validate_repo(repo)?;
+        Ok(format!("hf.co/{repo}:{quant}"))
+    } else if plain(repo) {
+        Ok(format!("{repo}:{quant}"))
+    } else {
+        Err(Error::Other(format!("`{repo}` is not a model name")))
+    }
+}
+
+/// What Running shows for a model: the repo's own name plus the quant, since
+/// the same model is a separate item per quant.
+pub fn model_display_name(repo: &str, quant: &str) -> String {
+    let (_, name) = hf::split_repo(repo);
+    format!("{name} ({quant})")
+}
+
+/// Everything that has to run to take a model off the device: unload it from
+/// memory, then delete its weights from Ollama's store. Pure, so the order is
+/// tested without an Ollama (leaving the weights behind was the old bug).
+pub fn model_remove_commands(tag: &str) -> Vec<Vec<String>> {
+    vec![
+        vec!["stop".to_string(), tag.to_string()],
+        vec!["rm".to_string(), tag.to_string()],
+    ]
 }
 
 fn free_port() -> Result<u16> {
@@ -219,7 +272,7 @@ async fn start_space(
 ) -> Result<Instance> {
     let state = app.state::<AppState>();
     let id = space.id.clone();
-    let inst_id = format!("space-{}", slug(&id));
+    let inst_id = space_instance_id(&id);
     // CPU-tier Spaces run without the GPU: the same rule the Store uses to skip
     // the gate, so they never count as residents either (#58).
     let gpu = state.has_gpu() && space.wants_gpu();
@@ -262,6 +315,20 @@ async fn start_space(
         }
         map.insert(inst_id.clone(), inst.clone());
     }
+    // Running lists the library, not the instances, so a Run of something that
+    // is not in it yet (Vision's own launch, a container adopted before this
+    // release, a retry from a stale card) subscribes it here instead of
+    // disappearing from Running the moment it stops.
+    library::add(
+        &app,
+        library::Entry::new(
+            inst_id.clone(),
+            Kind::Space,
+            id.clone(),
+            None,
+            inst.display_name.clone(),
+        ),
+    );
 
     let cancel = state.begin_instance_launch(&inst_id);
     let vendor = state.vendor();
@@ -713,36 +780,14 @@ pub async fn launch_model(
     // A model always contends for the shared budget when one exists (#70); the
     // frontend gates every model launch through `gpu_plan` unconditionally.
     gpu::require_lease(&state, lease_id.as_deref(), state.memory_budget_mb())?;
-    if quant.is_empty()
-        || !quant
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
-    {
-        return Err(Error::Other(format!("`{quant}` is not a model tag")));
-    }
-    // `owner/name` is a Hugging Face GGUF repo; a bare name is an Ollama
-    // library model (e.g. `qwen2.5vl` + `7b`), which is how vision models ship.
-    let tag = if repo.contains('/') {
-        hf::validate_repo(&repo)?;
-        format!("hf.co/{repo}:{quant}")
-    } else {
-        if repo.is_empty()
-            || !repo
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
-        {
-            return Err(Error::Other(format!("`{repo}` is not a model name")));
-        }
-        format!("{repo}:{quant}")
-    };
-    let inst_id = format!("model-{}", slug(&format!("{repo}-{quant}")));
-    let (_, name) = hf::split_repo(&repo);
+    let tag = model_tag(&repo, &quant)?;
+    let inst_id = model_instance_id(&repo, &quant);
     let inst = Instance {
         id: inst_id.clone(),
         kind: Kind::Model,
         repo: repo.clone(),
         model_tag: Some(tag.clone()),
-        display_name: format!("{name} ({quant})"),
+        display_name: model_display_name(&repo, &quant),
         status: Status::Pulling,
         port: Some(OLLAMA_PORT),
         url: None,
@@ -771,6 +816,17 @@ pub async fn launch_model(
         }
         map.insert(inst_id.clone(), inst.clone());
     }
+    // Same as `start_space`: a Run always implies a subscription.
+    library::add(
+        &app,
+        library::Entry::new(
+            inst_id.clone(),
+            Kind::Model,
+            repo.clone(),
+            Some(quant.clone()),
+            inst.display_name.clone(),
+        ),
+    );
 
     let cancel = state.begin_instance_launch(&inst_id);
     let app2 = app.clone();
@@ -907,32 +963,102 @@ pub fn mark_model_unloaded(app: &AppHandle, tag: &str) {
     }
 }
 
+/// Is Ollama still holding this model's weights? Only asked when `ollama rm`
+/// reported a failure: the model may simply never have been pulled.
+async fn model_present(state: &AppState, tag: &str) -> bool {
+    ollama::run(state, &["list"])
+        .await
+        .map(|o| {
+            o.stdout
+                .lines()
+                .any(|l| l.split_whitespace().next() == Some(tag))
+        })
+        .unwrap_or(false)
+}
+
+/// Unsubscribe: tear the item down and drop it from the library. A Space's
+/// container is removed and its image dropped when no other library item uses
+/// it; a model is unloaded and its weights deleted from Ollama (until now
+/// Remove left them on disk, so it freed nothing). Works on an item that was
+/// added but never run, where there is no instance at all.
 pub async fn remove(app: AppHandle, id: String) -> Result<()> {
     let state = app.state::<AppState>();
-    let Some(inst) = get(&state, &id) else {
+    let inst = get(&state, &id);
+    let entry = library::get(&state, &id);
+    let Some(kind) = inst
+        .as_ref()
+        .map(|i| i.kind)
+        .or_else(|| entry.as_ref().map(|e| e.kind))
+    else {
         return Ok(());
     };
+    let repo = inst
+        .as_ref()
+        .map(|i| i.repo.clone())
+        .or_else(|| entry.as_ref().map(|e| e.repo.clone()));
     state.cancel_instance_launch(&id);
-    if inst.kind == Kind::Space {
-        let cname = container_name(&id);
-        // Same rule as `stop` (#34): a failed remove must not desync the
-        // tracked map from what is actually still running.
-        if let Err(e) = wsl::sh(&format!("docker rm -f {cname} >/dev/null"))
-            .await
-            .and_then(|o| o.require("docker rm"))
-        {
-            update(&app, &id, |i| i.error = Some(e.to_string()));
-            return Err(e);
+    match kind {
+        Kind::Space => {
+            let cname = container_name(&id);
+            // Same rule as `stop` (#34): a failed remove must not desync the
+            // tracked map from what is actually still running.
+            if let Err(e) = wsl::sh(&format!("docker rm -f {cname} >/dev/null"))
+                .await
+                .and_then(|o| o.require("docker rm"))
+            {
+                update(&app, &id, |i| i.error = Some(e.to_string()));
+                return Err(e);
+            }
+        }
+        Kind::Model => {
+            let tag = inst.as_ref().and_then(|i| i.model_tag.clone()).or_else(|| {
+                let e = entry.as_ref()?;
+                model_tag(&e.repo, e.quant.as_deref()?).ok()
+            });
+            if let Some(tag) = tag {
+                let mut rm_failed = false;
+                for args in model_remove_commands(&tag) {
+                    let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+                    let failed = match ollama::run(&state, &argv).await {
+                        Ok(o) => !o.ok(),
+                        Err(e) => {
+                            log::warn!("{id}: ollama {} failed: {e}", argv.join(" "));
+                            true
+                        }
+                    };
+                    // `stop` fails on a model that was not loaded and `rm` on one
+                    // that was never pulled (an item added but never run); only
+                    // weights still on disk afterwards are a real failure.
+                    if failed && argv.first() == Some(&"rm") {
+                        rm_failed = true;
+                    }
+                }
+                if rm_failed && model_present(&state, &tag).await {
+                    let e = Error::Other(format!("could not delete {tag} from Ollama"));
+                    update(&app, &id, |i| i.error = Some(e.to_string()));
+                    return Err(e);
+                }
+            }
         }
     }
     if let Ok(mut m) = state.instances.lock() {
         m.remove(&id);
     }
-    // Only when nothing else references it (#63); Stopped instances never do.
-    storage::maybe_remove_image(&state, &inst).await;
-    let mut gone = inst;
-    gone.status = Status::Stopped;
-    let _ = app.emit(UPDATE_EVENT, gone);
+    // Drop the subscription before the image check: an image any remaining
+    // library item could run is kept (#63).
+    library::remove(&app, &id);
+    if kind == Kind::Space {
+        if let Some(repo) = repo {
+            storage::maybe_remove_image(&state, &repo).await;
+        }
+    }
+    // Whoever tracks instances (Chat's model picker, the GPU card) sees it
+    // stop; `library://update` is what takes the card off Running.
+    if let Some(mut gone) = inst {
+        gone.status = Status::Stopped;
+        gone.url = None;
+        let _ = app.emit(UPDATE_EVENT, gone);
+    }
     Ok(())
 }
 
@@ -974,6 +1100,13 @@ pub async fn discover(app: &AppHandle) {
             continue;
         }
         let (_, name) = hf::split_repo(&repo);
+        // A container from a session before the library existed, or from a
+        // library entry the user removed while it ran: adopt it into the
+        // library too, or Running would not list what is plainly running.
+        library::add(
+            app,
+            library::Entry::new(id.clone(), Kind::Space, repo.clone(), None, name.clone()),
+        );
         insert(
             &state,
             Instance {
@@ -1067,8 +1200,50 @@ pub fn mark_all_stopped_by_distro_loss(app: &AppHandle) {
 
 #[cfg(test)]
 mod tests {
-    use super::{candidate_bases, parse_pull_progress, parse_pull_size, space_command};
+    use super::{
+        candidate_bases, model_display_name, model_instance_id, model_remove_commands, model_tag,
+        parse_pull_progress, parse_pull_size, space_command, space_instance_id,
+    };
     use std::collections::HashMap;
+
+    #[test]
+    fn builds_model_tags_for_both_sources() {
+        assert_eq!(
+            model_tag("owner/name-GGUF", "Q4_K_M").unwrap(),
+            "hf.co/owner/name-GGUF:Q4_K_M"
+        );
+        assert_eq!(model_tag("qwen2.5vl", "7b").unwrap(), "qwen2.5vl:7b");
+        assert!(model_tag("owner/name", "Q4;id").is_err());
+        assert!(model_tag("owner/name", "").is_err());
+        assert!(model_tag("bad name", "7b").is_err());
+    }
+
+    /// The ids a library entry and its instance share (`library.rs`).
+    #[test]
+    fn ids_match_the_instance_scheme() {
+        assert_eq!(space_instance_id("Owner/My Space"), "space-owner-my-space");
+        assert_eq!(
+            model_instance_id("owner/name-GGUF", "Q4_K_M"),
+            "model-owner-name-gguf-q4-k-m"
+        );
+        assert_eq!(
+            model_display_name("owner/name-GGUF", "Q4_K_M"),
+            "name-GGUF (Q4_K_M)"
+        );
+    }
+
+    /// Remove must unload the model before deleting it, and must delete it at
+    /// all: `remove()` used to leave the weights in Ollama's store.
+    #[test]
+    fn model_remove_unloads_then_deletes() {
+        assert_eq!(
+            model_remove_commands("hf.co/owner/name:Q4_K_M"),
+            vec![
+                vec!["stop".to_string(), "hf.co/owner/name:Q4_K_M".to_string()],
+                vec!["rm".to_string(), "hf.co/owner/name:Q4_K_M".to_string()],
+            ]
+        );
+    }
 
     #[test]
     fn parses_docker_pull_sizes() {
