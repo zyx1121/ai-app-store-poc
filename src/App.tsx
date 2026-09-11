@@ -63,7 +63,7 @@ function App() {
       <div className="flex h-screen w-screen flex-col overflow-hidden bg-background text-foreground">
         <TitleBar />
         <div className="flex min-h-0 flex-1">
-          <aside className="flex w-56 shrink-0 flex-col gap-1 border-r border-border p-3">
+          <aside className="flex w-40 shrink-0 flex-col gap-1 border-r border-border p-3">
             {navItems.map(({ key, label, icon: Icon }) => (
               <button
                 key={key}
