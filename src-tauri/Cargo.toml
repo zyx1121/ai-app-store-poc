@@ -1,6 +1,6 @@
 [package]
 name = "ai-app-store-poc"
-version = "0.2.1"
+version = "0.3.0"
 description = "One-click local AI app store for Hugging Face models and Spaces"
 authors = ["Loki <yongxiang.zhan@outlook.com>"]
 license = "MIT"
