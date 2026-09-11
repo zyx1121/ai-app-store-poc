@@ -561,6 +561,13 @@ async fn run_space(
         let q = wsl::quote(value);
         extra_env.push_str(&format!(" -e {name}={q}"));
     }
+    // Mimic the HF Space runtime so the app binds a reachable port:
+    // - SPACE_ID / SPACE_AUTHOR_NAME / SPACE_REPO_NAME: many demos only listen
+    //   on 0.0.0.0 when SPACE_ID is set (facebook/MusicGen defaults to
+    //   127.0.0.1 otherwise, so the published port never answered).
+    // - GRADIO_SSR_MODE=False: Space images set SSR on, which binds the node
+    //   frontend to 127.0.0.1:<port> and moves the Python server to <port>+1.
+    let (space_author, space_name) = repo.split_once('/').unwrap_or(("", repo));
     let run = format!(
         "docker rm -f {cname} >/dev/null 2>&1; \
          docker run -d --name {cname} {gpu_flag} {publish} {harden} {mem_flag} \
@@ -568,7 +575,8 @@ async fn run_space(
            --label aias.gpu={gpu_label} \
            -v {HF_CACHE_VOLUME}:/home/user/.cache/huggingface \
            -e HF_HOME=/home/user/.cache/huggingface \
-           -e PORT={app_port} -e GRADIO_SERVER_NAME=0.0.0.0 -e GRADIO_SERVER_PORT={app_port}{extra_env} \
+           -e PORT={app_port} -e GRADIO_SERVER_NAME=0.0.0.0 -e GRADIO_SERVER_PORT={app_port} \
+           -e GRADIO_SSR_MODE=False -e SPACE_ID='{repo}' -e SPACE_AUTHOR_NAME='{space_author}' -e SPACE_REPO_NAME='{space_name}'{extra_env} \
            {image} {command}"
     );
     update(app, id, |i| {
