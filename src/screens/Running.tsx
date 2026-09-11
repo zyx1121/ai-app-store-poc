@@ -78,9 +78,7 @@ function EnvRetry({ onRetry }: { onRetry: (env: Record<string, string>) => void 
 
   return (
     <div className="flex flex-col gap-1.5 rounded-lg border border-border p-2">
-      <label className="text-xs text-muted-foreground">
-        Secrets this app reads from its environment, one NAME=value per line
-      </label>
+      <label className="text-xs text-muted-foreground">Secrets, one NAME=value per line</label>
       <Textarea
         value={text}
         onChange={(e) => setText(e.target.value)}
@@ -217,9 +215,7 @@ export function Running({ onOpenChat }: { onOpenChat: (instanceId: string) => vo
     return (
       <div className="flex flex-col gap-3 p-6">
         <GpuMemoryCard />
-        <p className="text-sm text-muted-foreground">
-          No instances yet. Launch an app or model from the Store.
-        </p>
+        <p className="text-sm text-muted-foreground">Nothing running</p>
       </div>
     );
   }
@@ -231,9 +227,7 @@ export function Running({ onOpenChat }: { onOpenChat: (instanceId: string) => vo
     <div className="flex flex-col gap-3 p-6">
       <GpuMemoryCard />
       {live.length === 0 && (
-        <p className="text-sm text-muted-foreground">
-          No active instances. Launch an app or model from the Store.
-        </p>
+        <p className="text-sm text-muted-foreground">Nothing running</p>
       )}
       {live.map((instance) => (
         <InstanceCard

@@ -677,7 +677,6 @@ export function Vision({ active = true }: { active?: boolean }) {
         <Card className="shrink-0">
           <CardHeader>
             <CardTitle>Source</CardTitle>
-            <CardDescription>Capture from a camera or pick an image.</CardDescription>
           </CardHeader>
           <CardContent className="flex flex-col gap-3">
             <Tabs value={sourceTab} onValueChange={(v) => v && setSourceTab(v as "camera" | "image")}>

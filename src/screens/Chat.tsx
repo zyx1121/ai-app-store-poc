@@ -123,7 +123,7 @@ function ChatSession({ instance }: { instance: Instance }) {
             <ConversationEmptyState
               icon={<MessageSquare className="size-10" />}
               title="Start a conversation"
-              description={`Messages go straight to ${instance.display_name} on this machine.`}
+              description={instance.display_name}
             />
           ) : (
             messages.map((message, index) => (
@@ -220,7 +220,7 @@ export function Chat({ initialInstanceId }: { initialInstanceId?: string }) {
           </SelectContent>
         </Select>
         {instances.length === 0 && (
-          <p className="text-sm text-muted-foreground">No running models. Launch one from the Store.</p>
+          <p className="text-sm text-muted-foreground">No running models</p>
         )}
       </div>
       {selected && <ChatSession key={selected.id} instance={selected} />}
