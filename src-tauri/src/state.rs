@@ -8,6 +8,7 @@ use tokio::process::Child;
 use crate::hardware::Vendor;
 use crate::hf::{RawSpace, SpaceSummary};
 use crate::instances::Instance;
+use crate::library::Entry;
 use crate::runtime::RuntimeStatus;
 use crate::services::{ServiceId, ServiceStatus};
 
@@ -17,6 +18,9 @@ pub struct AppState {
     pub http: reqwest::Client,
     pub runtime: Mutex<Option<RuntimeStatus>>,
     pub instances: Mutex<BTreeMap<String, Instance>>,
+    /// What the user added from the Store, loaded from `library.json` once at
+    /// startup and persisted on every change. Live instances join to it by id.
+    pub library: Mutex<Vec<Entry>>,
     pub keepalive: Mutex<Option<Child>>,
     /// `compare_exchange`d, not just locked: `discover()` claims it before the
     /// probe and rolls back on failure, so a transient WSL hiccup right after
@@ -76,6 +80,7 @@ impl Default for AppState {
             http,
             runtime: Mutex::new(None),
             instances: Mutex::new(BTreeMap::new()),
+            library: Mutex::new(Vec::new()),
             keepalive: Mutex::new(None),
             discovered: AtomicBool::new(false),
             services: Mutex::new(HashMap::new()),

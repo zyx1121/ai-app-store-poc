@@ -6,6 +6,7 @@ mod gpu;
 mod hardware;
 mod hf;
 mod instances;
+mod library;
 mod ollama;
 mod reconcile;
 mod runtime;
@@ -72,6 +73,14 @@ async fn search_models(
     .await)
 }
 
+/// Details for one Space, live from the Hub (cached per session): what Running
+/// needs before a Run, namely the secrets the Space reads, the hardware tier
+/// that decides whether the GPU gate applies, and its SDK.
+#[tauri::command]
+async fn space_summary(state: State<'_, AppState>, repo: String) -> CmdResult<hf::SpaceSummary> {
+    cmd(hf::space(state.inner(), &repo).await)
+}
+
 #[tauri::command]
 async fn model_files(state: State<'_, AppState>, repo: String) -> CmdResult<Vec<hf::GgufFile>> {
     cmd(hf::model_files(state.inner(), &repo).await)
@@ -134,6 +143,67 @@ async fn launch_model(
     lease_id: Option<String>,
 ) -> CmdResult<instances::Instance> {
     cmd(instances::launch_model(app, repo, quant, lease_id).await)
+}
+
+/// Subscribe to a Space: record it in the library and download nothing. The
+/// display name comes from the Hub when it answers, from the repo id when it
+/// does not, so Add works offline and before the runtime is installed.
+#[tauri::command]
+async fn add_space(app: AppHandle, repo: String) -> CmdResult<library::LibraryItem> {
+    let state = app.state::<AppState>();
+    hf::validate_repo(&repo).map_err(|e| e.to_string())?;
+    let display_name = match hf::space(state.inner(), &repo).await {
+        Ok(space) => space.title.unwrap_or(space.name),
+        Err(e) => {
+            log::warn!("add_space {repo}: no Hub details ({e}); naming it after the repo");
+            hf::split_repo(&repo).1
+        }
+    };
+    let entry = library::Entry::new(
+        instances::space_instance_id(&repo),
+        instances::Kind::Space,
+        repo,
+        None,
+        display_name,
+    );
+    Ok(added_item(&app, entry))
+}
+
+/// Subscribe to one quant of a model. Nothing is pulled; `launch_model` from
+/// Running does that.
+#[tauri::command]
+async fn add_model(app: AppHandle, repo: String, quant: String) -> CmdResult<library::LibraryItem> {
+    // Rejects a repo or quant that could not be launched later.
+    instances::model_tag(&repo, &quant).map_err(|e| e.to_string())?;
+    let entry = library::Entry::new(
+        instances::model_instance_id(&repo, &quant),
+        instances::Kind::Model,
+        repo.clone(),
+        Some(quant.clone()),
+        instances::model_display_name(&repo, &quant),
+    );
+    Ok(added_item(&app, entry))
+}
+
+/// Store the entry (or keep the existing one) and answer with the merged item
+/// the two Add commands return.
+fn added_item(app: &AppHandle, entry: library::Entry) -> library::LibraryItem {
+    let id = entry.id.clone();
+    let stored = library::add(app, entry);
+    library::list(app)
+        .into_iter()
+        .find(|i| i.id == id)
+        // The library is only read back to pick up a live instance's status;
+        // an entry that raced a Remove is still reported as added.
+        .unwrap_or_else(|| library::merge(&[stored], &[]).remove(0))
+}
+
+/// Everything the user added, live items first. Adopts containers left from a
+/// previous session first, the same way `list_instances` does.
+#[tauri::command]
+async fn list_library(app: AppHandle) -> CmdResult<Vec<library::LibraryItem>> {
+    instances::discover(&app).await;
+    Ok(library::list(&app))
 }
 
 #[tauri::command]
@@ -328,9 +398,16 @@ pub fn run() {
             let handle = app.handle().clone();
             // Load the HF token (#60), if the user set one on a previous run.
             let stored_token = token::load(&handle);
+            // The library is what Running lists; load it before the first
+            // screen renders, once per run.
+            let stored_library = library::load(&handle);
             let state = handle.state::<AppState>();
             if let Ok(mut guard) = state.hf_token.lock() {
                 *guard = stored_token;
+            }
+            if let Ok(mut guard) = state.library.lock() {
+                log::info!("library at startup: {} items", stored_library.len());
+                *guard = stored_library;
             }
             tauri::async_runtime::spawn(async move {
                 let state = handle.state::<AppState>();
@@ -375,9 +452,13 @@ pub fn run() {
             search_spaces,
             search_models,
             model_files,
+            space_summary,
             launch_space,
             build_space,
             launch_model,
+            add_space,
+            add_model,
+            list_library,
             list_instances,
             stop_instance,
             remove_instance,

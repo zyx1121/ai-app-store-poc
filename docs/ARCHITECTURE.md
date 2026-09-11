@@ -53,6 +53,7 @@ reason string. An `incompatible` item cannot be launched.
 | Spaces | `docker pull registry.hf.space/<owner>-<name>:latest`, `docker run -p <free port>:<app_port> --gpus all`, poll the port until it answers; labels `aias.*` let a restarted app re-adopt containers |
 | Models | `ollama pull hf.co/<repo>:<quant>`, warm load through `/api/generate`, served on `localhost:11434/v1`; the Chat screen streams from it directly |
 | GPU memory | `gpu.rs` lists what is resident (Ollama `/api/ps`, GPU-backed services, GPU Space containers) against the accelerator's budget; before a launch the UI asks `gpu_plan`, shows what would be unloaded (largest heavy resident first until it fits), and `gpu_release` unloads it (`keep_alive: 0`, ComfyUI `/free`, container stop). One model family at a time on a 10 GB card; light services (speech, detection) stay |
+| Library | `library.json` in the app data dir (`library.rs`): Store's Add records `{ id, kind, repo, quant, display_name, added_at }` and nothing else happens. Running lists the entries joined with the live instances by id, and is where Run (GPU gate, secrets), Stop and Remove live. Remove is the only destructive action: container and image for a Space, `ollama rm` for a model, then the entry. An entry's image counts as in use, so cleanup never deletes what an added item would need |
 | Contract | every command and event is typed once in `src/lib/api.ts`; the Rust side mirrors it with serde |
 
 ## Hardware vendors

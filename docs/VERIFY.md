@@ -37,8 +37,8 @@ reliable (ollama/ollama#7969), which is why the zip is used.
    cannot do for the user. Screenshot it.
 3. Click "Install". Watch the log: on non-NVIDIA machines the WSL Ollama step is
    skipped and an "Ollama runs natively on Windows" step downloads the zip.
-4. Store, Models tab: run a small GGUF (any `Q4_K_M` under 5 GB). Chat with
-   it. Then note what `ollama ps` reports (the verification script prints it):
+4. Store, Models tab: add a small GGUF (any `Q4_K_M` under 5 GB), then Run it
+   from Running and Chat with it. Then note what `ollama ps` reports (the verification script prints it):
    `size_vram` above zero means the GPU backend is in use.
 5. Audio: Start Speaches (TTS). On AMD / Intel also download the whisper.cpp
    model and Start it: the card must show `vulkan` and reach Running; record
@@ -58,8 +58,10 @@ reliable (ollama/ollama#7969), which is why the zip is used.
    Unload buttons.
 7. Vision: Start the CV server (OpenVINO Model Server on non-NVIDIA), download
    YOLOv10n, load an image, Detect. Expect boxes with scores in under a second.
-8. Store, Apps tab: "Build locally" on a small gradio Space, for example
-   `lampongyuen/Gradio-Hello-World-3`. It must reach Running and open.
+8. Store, Apps tab: Add a small gradio Space, for example
+   `lampongyuen/Gradio-Hello-World-3`, then "Build locally" from Running. It
+   must reach Running and open. Remove it and check `docker images` and
+   `ollama list`: the image (or the model's weights) must be gone.
 9. Run the checklist and paste its output into the issue:
 
    ```powershell

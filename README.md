@@ -38,7 +38,7 @@ Edge AI boxes ship with a GPU and nothing to run on it. Getting one Hugging Face
 
 - **Install the runtime in one click**: WSL2, an isolated Ubuntu distro, Docker Engine, NVIDIA container toolkit and Ollama, with a live log and a reboot prompt when Windows needs one.
 - **Store: Spaces and GGUF models live**: search the Hub by text or category, scroll without end, see likes, SDK, hardware tier and a compatibility badge (ready / maybe / incompatible, with the reason) before you run anything.
-- **Run and use**: a Space becomes a container on a free local port and opens in the browser; a model is pulled into Ollama and served on an OpenAI-compatible API with a built-in chat UI.
+- **Add in the Store, run in Running**: Add subscribes an app or a model and downloads nothing. Running is the library: it runs, stops, opens and removes every added item. A Space becomes a container on a free local port and opens in the browser; a model is pulled into Ollama and served on an OpenAI-compatible API with a built-in chat UI. Remove deletes the container, the image and the model's weights; Stop keeps them.
 
 ## Install
 
@@ -46,7 +46,7 @@ Windows 11 with virtualization enabled. NVIDIA GPUs get the full CUDA path; AMD 
 
 1. Download the latest `.msi` from [Releases](https://github.com/zyx1121/ai-app-store-poc/releases) and install it.
 2. Open **AI App Store**. The Setup screen lists what is missing; click **Install runtime**. If WSL was just enabled, reboot when asked and open the app again.
-3. Search, click **Run**, and open the result from **Running**.
+3. Search, click **Add**, then **Run** it from **Running** and open it there.
 
 Uninstall from Settings > Apps. The WSL distro and its images stay until you run `wsl --unregister ai-app-store`.
 

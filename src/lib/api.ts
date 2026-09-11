@@ -226,6 +226,14 @@ export const searchModels = (
 /** GGUF files of one model repo, sorted by size ascending, with fit annotations. */
 export const modelFiles = (repo: string) => invoke<GgufFile[]>("model_files", { repo });
 
+/**
+ * Details for one Space, fetched live from the Hub. Running asks for them
+ * before a Run: the `secrets` decide whether the secrets dialog opens, the
+ * `hardware` tier whether the GPU gate applies, and `sdk` whether the image
+ * can be built here.
+ */
+export const spaceSummary = (repo: string) => invoke<SpaceSummary>("space_summary", { repo });
+
 // ---------------------------------------------------------------------------
 // Instances (things we launched)
 // ---------------------------------------------------------------------------
@@ -298,6 +306,11 @@ export const listInstances = () => invoke<Instance[]>("list_instances");
 
 export const stopInstance = (id: string) => invoke<void>("stop_instance", { id });
 
+/**
+ * Unsubscribe and delete: stops a Space's container and drops its image when
+ * no other library item runs it, unloads a model and deletes its weights from
+ * Ollama, then drops the library entry. Stop keeps the item; this does not.
+ */
 export const removeInstance = (id: string) => invoke<void>("remove_instance", { id });
 
 export const openUrl = (url: string) => invoke<void>("open_url", { url });
@@ -305,6 +318,51 @@ export const openUrl = (url: string) => invoke<void>("open_url", { url });
 /** Fires whenever an instance changes status or gains log lines. */
 export const onInstanceUpdate = (cb: (i: Instance) => void): Promise<UnlistenFn> =>
   listen<Instance>("instance://update", (ev) => cb(ev.payload));
+
+// ---------------------------------------------------------------------------
+// Library: what the user added from the Store. Add records an item and
+// downloads nothing; Running is where it is run, stopped and removed. An
+// entry outlives the instances it spawns, so `status` is `stopped` whenever
+// nothing is live for it.
+// ---------------------------------------------------------------------------
+
+export type LibraryItem = {
+  /** same id as the instance a Run creates (`space-<slug>` / `model-<slug>`) */
+  id: string;
+  kind: InstanceKind;
+  /** HF repo id (`owner/name`), or a bare Ollama library name for models */
+  repo: string;
+  /** models only: the quant (`Q4_K_M`) or Ollama library tag (`7b`) */
+  quant: string | null;
+  display_name: string;
+  /** unix seconds, as a string */
+  added_at: string;
+  /** `stopped` when nothing is live for this item, including before its first Run */
+  status: InstanceStatus;
+  model_tag: string | null;
+  port: number | null;
+  url: string | null;
+  error: string | null;
+  log_tail: string[];
+  local_build: boolean;
+  gpu: boolean;
+  pull_size_mb: number | null;
+  progress_pct: number | null;
+};
+
+/** Subscribe to a Space. Downloads nothing, starts nothing, needs no GPU lease. */
+export const addSpace = (repo: string) => invoke<LibraryItem>("add_space", { repo });
+
+/** Subscribe to one quant of a model; `launchModel` from Running pulls it. */
+export const addModel = (repo: string, quant: string) =>
+  invoke<LibraryItem>("add_model", { repo, quant });
+
+/** Everything added, live items first, then the newest addition. */
+export const listLibrary = () => invoke<LibraryItem[]>("list_library");
+
+/** Fires with the whole library whenever an item is added or removed. */
+export const onLibraryUpdate = (cb: (items: LibraryItem[]) => void): Promise<UnlistenFn> =>
+  listen<LibraryItem[]>("library://update", (ev) => cb(ev.payload));
 
 // ---------------------------------------------------------------------------
 // Platform services: extra inference servers the store runs as containers

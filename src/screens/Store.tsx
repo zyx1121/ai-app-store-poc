@@ -1,14 +1,17 @@
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from "react";
+import { Check } from "lucide-react";
 import {
-  buildSpace,
-  launchModel,
-  launchSpace,
+  addModel,
+  addSpace,
+  listLibrary,
   modelFiles,
   MODEL_PIPELINES,
+  onLibraryUpdate,
   searchModels,
   searchSpaces,
   SPACE_CATEGORIES,
   type GgufFile,
+  type LibraryItem,
   type ModelSummary,
   type SpaceSummary,
 } from "@/lib/api";
@@ -26,7 +29,6 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import {
   Dialog,
   DialogContent,
@@ -37,32 +39,43 @@ import {
 } from "@/components/ui/dialog";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { CompatBadge } from "@/components/CompatBadge";
-import { useGpuGate } from "@/components/GpuGate";
 import { formatBytes, formatCount } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
 type LoadState = "loading" | "idle" | "error";
 
-const BUILD_DONT_ASK_KEY = "buildLocally.dontAskAgain";
-const BUILD_USE_REPO_DOCKERFILE_KEY = "buildLocally.useRepoDockerfile";
-
-function loadBoolPreference(key: string): boolean {
-  try {
-    return localStorage.getItem(key) === "true";
-  } catch {
-    return false;
-  }
+/** A model is added per quant, so an added model's key is repo + quant. */
+function modelKey(repo: string, quant: string): string {
+  return `${repo}|${quant}`;
 }
 
-function saveBoolPreference(key: string, value: boolean) {
-  try {
-    localStorage.setItem(key, String(value));
-  } catch {
-    // ignore (private browsing, storage disabled, ...)
+/** The only action a Store card has: subscribe. Once added it stays disabled
+ * with a check, and Running takes over. */
+function AddButton({
+  added,
+  adding,
+  disabled,
+  onAdd,
+}: {
+  added: boolean;
+  adding: boolean;
+  disabled: boolean;
+  onAdd: () => void;
+}) {
+  if (added) {
+    return (
+      <Button className="w-full" variant="outline" disabled>
+        <Check className="size-4" />
+        Added
+      </Button>
+    );
   }
+  return (
+    <Button className="w-full" disabled={disabled || adding} onClick={onAdd}>
+      {adding ? "Adding..." : "Add"}
+    </Button>
+  );
 }
-
-type BuildConsent = { proceed: boolean; useRepoDockerfile: boolean };
 
 function CardGridSkeleton({ count = 6 }: { count?: number }) {
   return (
@@ -268,7 +281,7 @@ function pickDefaultFile(files: GgufFile[]): GgufFile | null {
   return null;
 }
 
-export function Store({ onLaunched }: { onLaunched: () => void }) {
+export function Store() {
   const [query, setQuery] = useState("");
   const [debouncedQuery, setDebouncedQuery] = useState("");
   const [tab, setTab] = useState<"apps" | "models">("apps");
@@ -298,26 +311,46 @@ export function Store({ onLaunched }: { onLaunched: () => void }) {
   const spaces = spacesFeed.feed.items;
   const models = modelsFeed.feed.items;
 
-  const [launchingId, setLaunchingId] = useState<string | null>(null);
-  const [buildingId, setBuildingId] = useState<string | null>(null);
-  const [launchError, setLaunchError] = useState<string | null>(null);
+  const [addingId, setAddingId] = useState<string | null>(null);
+  const [addError, setAddError] = useState<string | null>(null);
+  const [library, setLibrary] = useState<LibraryItem[]>([]);
 
   const [dialogModel, setDialogModel] = useState<ModelSummary | null>(null);
   const [files, setFiles] = useState<GgufFile[]>([]);
   const [filesState, setFilesState] = useState<LoadState>("loading");
   const [selectedFile, setSelectedFile] = useState<GgufFile | null>(null);
-  const [launching, setLaunching] = useState(false);
-  const { gate, dialog: gpuDialog } = useGpuGate();
+  const [adding, setAdding] = useState(false);
 
-  const [buildConsentSpace, setBuildConsentSpace] = useState<SpaceSummary | null>(null);
-  const [consentUseRepoDockerfile, setConsentUseRepoDockerfile] = useState(false);
-  const [consentDontAskAgain, setConsentDontAskAgain] = useState(false);
-  const buildConsentResolve = useRef<((choice: BuildConsent) => void) | null>(null);
+  // Which cards say "Added". A Space is one item; a model is one item per
+  // quant, so the file list checks the quant too.
+  const addedSpaces = new Set(library.filter((i) => i.kind === "space").map((i) => i.repo));
+  const addedModelRepos = new Set(library.filter((i) => i.kind === "model").map((i) => i.repo));
+  const addedModels = new Set(
+    library.filter((i) => i.kind === "model").map((i) => modelKey(i.repo, i.quant ?? "")),
+  );
 
   useEffect(() => {
     const t = setTimeout(() => setDebouncedQuery(query), 400);
     return () => clearTimeout(t);
   }, [query]);
+
+  // Adds from this screen come back on the event too, so the grid and Running
+  // never disagree about what is in the library.
+  useEffect(() => {
+    let cancelled = false;
+    listLibrary().then((items) => {
+      if (!cancelled) setLibrary(items);
+    });
+    let unlisten: (() => void) | undefined;
+    onLibraryUpdate((items) => setLibrary(items)).then((fn) => {
+      if (cancelled) fn();
+      else unlisten = fn;
+    });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
 
   useEffect(() => {
     if (!dialogModel) return;
@@ -343,137 +376,37 @@ export function Store({ onLaunched }: { onLaunched: () => void }) {
     if (e.key === "Enter") setDebouncedQuery(query);
   }
 
-  /** Spaces on a GPU tier hold VRAM of their own; CPU tiers launch without asking. */
-  function spaceWantsGpu(space: SpaceSummary): boolean {
-    return !!space.hardware && !space.hardware.startsWith("cpu");
-  }
-
-  async function runSpace(space: SpaceSummary, env?: Record<string, string>) {
-    setLaunchError(null);
-    setLaunchingId(space.id);
+  /** Add records the Space and nothing else: no pull, no GPU lease, no
+   * secrets. Running is where it is run. */
+  async function handleAddSpace(space: SpaceSummary) {
+    setAddError(null);
+    setAddingId(space.id);
     try {
-      let leaseId: string | null = null;
-      if (spaceWantsGpu(space)) {
-        const result = await gate({ kind: "space", id: space.id }, space.title ?? space.name);
-        if (!result.proceed) return;
-        leaseId = result.leaseId;
-      }
-      await launchSpace(space.id, env, leaseId);
-      onLaunched();
+      await addSpace(space.id);
     } catch (e) {
-      setLaunchError(String(e));
+      setAddError(String(e));
     } finally {
-      setLaunchingId(null);
+      setAddingId(null);
     }
   }
 
-  /**
-   * Build locally runs code from the Space's own repository (cloned Dockerfile
-   * or generated one, either way `RUN` steps execute here with network access).
-   * Ask once; after "Don't ask again" reuse the stored choice silently.
-   */
-  function confirmBuildLocally(space: SpaceSummary): Promise<BuildConsent> {
-    if (loadBoolPreference(BUILD_DONT_ASK_KEY)) {
-      return Promise.resolve({
-        proceed: true,
-        useRepoDockerfile: loadBoolPreference(BUILD_USE_REPO_DOCKERFILE_KEY),
-      });
-    }
-    return new Promise<BuildConsent>((resolve) => {
-      buildConsentResolve.current = resolve;
-      setConsentUseRepoDockerfile(false);
-      setConsentDontAskAgain(false);
-      setBuildConsentSpace(space);
-    });
-  }
-
-  function finishBuildConsent(proceed: boolean) {
-    const resolve = buildConsentResolve.current;
-    buildConsentResolve.current = null;
-    setBuildConsentSpace(null);
-    if (proceed && consentDontAskAgain) {
-      saveBoolPreference(BUILD_DONT_ASK_KEY, true);
-      saveBoolPreference(BUILD_USE_REPO_DOCKERFILE_KEY, consentUseRepoDockerfile);
-    }
-    resolve?.({ proceed, useRepoDockerfile: consentUseRepoDockerfile });
-  }
-
-  async function runBuildSpace(space: SpaceSummary, env?: Record<string, string>) {
-    setLaunchError(null);
-    setBuildingId(space.id);
-    try {
-      let leaseId: string | null = null;
-      if (spaceWantsGpu(space)) {
-        const result = await gate({ kind: "space", id: space.id }, space.title ?? space.name);
-        if (!result.proceed) return;
-        leaseId = result.leaseId;
-      }
-      const { proceed, useRepoDockerfile } = await confirmBuildLocally(space);
-      if (!proceed) return;
-      await buildSpace(space.id, useRepoDockerfile, env, leaseId);
-      onLaunched();
-    } catch (e) {
-      setLaunchError(String(e));
-    } finally {
-      setBuildingId(null);
-    }
-  }
-
-  // A Space that needs secrets (#57) is never launched directly: the button
-  // opens this dialog first so the user can supply values.
-  const [envDialogSpace, setEnvDialogSpace] = useState<SpaceSummary | null>(null);
-  const [envDialogKind, setEnvDialogKind] = useState<"run" | "build" | null>(null);
-  const [envValues, setEnvValues] = useState<Record<string, string>>({});
-
-  function startLaunch(space: SpaceSummary, kind: "run" | "build") {
-    if (space.secrets.length > 0) {
-      setEnvDialogSpace(space);
-      setEnvDialogKind(kind);
-      setEnvValues(Object.fromEntries(space.secrets.map((name) => [name, ""])));
-      return;
-    }
-    if (kind === "run") runSpace(space);
-    else runBuildSpace(space);
-  }
-
-  function closeEnvDialog() {
-    setEnvDialogSpace(null);
-    setEnvDialogKind(null);
-  }
-
-  async function confirmEnvLaunch() {
-    if (!envDialogSpace || !envDialogKind) return;
-    const space = envDialogSpace;
-    const kind = envDialogKind;
-    closeEnvDialog();
-    if (kind === "run") await runSpace(space, envValues);
-    else await runBuildSpace(space, envValues);
-  }
-
-  async function confirmLaunchModel() {
+  /** A model is added per quant, so the file list opens first. */
+  async function handleAddModel() {
     if (!dialogModel || !selectedFile) return;
-    setLaunching(true);
-    setLaunchError(null);
+    setAdding(true);
+    setAddError(null);
     try {
-      const tag = `hf.co/${dialogModel.id}:${selectedFile.quant}`;
-      const result = await gate(
-        { kind: "model", tag, size_bytes: selectedFile.size_bytes },
-        dialogModel.name,
-      );
-      if (!result.proceed) return;
-      await launchModel(dialogModel.id, selectedFile.quant, result.leaseId);
+      await addModel(dialogModel.id, selectedFile.quant);
       setDialogModel(null);
-      onLaunched();
     } catch (e) {
-      setLaunchError(String(e));
+      setAddError(String(e));
     } finally {
-      setLaunching(false);
+      setAdding(false);
     }
   }
 
   return (
     <div className="flex flex-col gap-4 p-6">
-      {gpuDialog}
       <h1 className="font-heading text-lg font-medium">Store</h1>
 
       <Input
@@ -484,10 +417,10 @@ export function Store({ onLaunched }: { onLaunched: () => void }) {
         className="max-w-sm"
       />
 
-      {launchError && (
+      {addError && (
         <Alert variant="destructive">
-          <AlertTitle>Could not launch</AlertTitle>
-          <AlertDescription>{launchError}</AlertDescription>
+          <AlertTitle>Could not add</AlertTitle>
+          <AlertDescription>{addError}</AlertDescription>
         </Alert>
       )}
 
@@ -553,37 +486,13 @@ export function Store({ onLaunched }: { onLaunched: () => void }) {
                       </span>
                     )}
                   </CardContent>
-                  <CardFooter className="mt-auto flex gap-2">
-                    <Button
-                      className="flex-1"
-                      disabled={space.compat === "incompatible" || launchingId === space.id}
-                      onClick={() => startLaunch(space, "run")}
-                    >
-                      {launchingId === space.id ? "Launching..." : "Run"}
-                    </Button>
-                    {space.sdk !== "static" && (
-                      <Tooltip>
-                        <TooltipTrigger
-                          render={
-                            <Button
-                              variant="outline"
-                              disabled={
-                                buildingId === space.id ||
-                                (space.compat === "incompatible" &&
-                                  (space.compat_reason?.toLowerCase().includes("static") ?? false))
-                              }
-                              onClick={() => startLaunch(space, "build")}
-                            />
-                          }
-                        >
-                          {buildingId === space.id ? "Building..." : "Build locally"}
-                        </TooltipTrigger>
-                        <TooltipContent>
-                          Clone the Space and build its image on this machine (CPU on non-NVIDIA
-                          GPUs)
-                        </TooltipContent>
-                      </Tooltip>
-                    )}
+                  <CardFooter className="mt-auto">
+                    <AddButton
+                      added={addedSpaces.has(space.id)}
+                      adding={addingId === space.id}
+                      disabled={space.compat === "incompatible"}
+                      onAdd={() => handleAddSpace(space)}
+                    />
                   </CardFooter>
                 </Card>
               ))}
@@ -636,13 +545,12 @@ export function Store({ onLaunched }: { onLaunched: () => void }) {
                     <span>{formatCount(model.downloads)} downloads</span>
                   </CardContent>
                   <CardFooter className="mt-auto">
-                    <Button
-                      className="w-full"
+                    <AddButton
+                      added={addedModelRepos.has(model.id)}
+                      adding={false}
                       disabled={model.compat === "incompatible"}
-                      onClick={() => setDialogModel(model)}
-                    >
-                      Run
-                    </Button>
+                      onAdd={() => setDialogModel(model)}
+                    />
                   </CardFooter>
                 </Card>
               ))}
@@ -706,7 +614,12 @@ export function Store({ onLaunched }: { onLaunched: () => void }) {
                     <span className="font-medium">{file.quant}</span>
                     <span className="text-xs text-muted-foreground">{formatBytes(file.size_bytes)}</span>
                   </span>
-                  <FitBadge fits={file.fits} />
+                  <span className="flex items-center gap-1.5">
+                    {dialogModel && addedModels.has(modelKey(dialogModel.id, file.quant)) && (
+                      <Badge variant="outline">Added</Badge>
+                    )}
+                    <FitBadge fits={file.fits} />
+                  </span>
                 </button>
               ))}
             </div>
@@ -717,91 +630,16 @@ export function Store({ onLaunched }: { onLaunched: () => void }) {
               Cancel
             </Button>
             <Button
-              disabled={!selectedFile || selectedFile.fits === "no" || launching}
-              onClick={confirmLaunchModel}
+              disabled={
+                !selectedFile ||
+                selectedFile.fits === "no" ||
+                adding ||
+                (dialogModel !== null &&
+                  addedModels.has(modelKey(dialogModel.id, selectedFile.quant)))
+              }
+              onClick={handleAddModel}
             >
-              {launching ? "Launching..." : "Run"}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      <Dialog
-        open={buildConsentSpace !== null}
-        onOpenChange={(open) => {
-          if (!open) finishBuildConsent(false);
-        }}
-      >
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Build locally?</DialogTitle>
-            <DialogDescription>
-              Build locally runs code from this Space's repository on your PC. Continue?
-            </DialogDescription>
-          </DialogHeader>
-          <label className="flex items-center gap-2 text-sm">
-            <input
-              type="checkbox"
-              className="size-4 rounded border-input"
-              checked={consentUseRepoDockerfile}
-              onChange={(e) => setConsentUseRepoDockerfile(e.target.checked)}
-            />
-            Use the Space's own Dockerfile (runs its `RUN` steps verbatim)
-          </label>
-          <label className="flex items-center gap-2 text-sm">
-            <input
-              type="checkbox"
-              className="size-4 rounded border-input"
-              checked={consentDontAskAgain}
-              onChange={(e) => setConsentDontAskAgain(e.target.checked)}
-            />
-            Don't ask again
-          </label>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => finishBuildConsent(false)}>
-              Cancel
-            </Button>
-            <Button onClick={() => finishBuildConsent(true)}>Continue</Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      <Dialog
-        open={envDialogSpace !== null}
-        onOpenChange={(open) => {
-          if (!open) closeEnvDialog();
-        }}
-      >
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Secrets for {envDialogSpace?.title ?? envDialogSpace?.name}</DialogTitle>
-            <DialogDescription>
-              This Space reads these values from its environment; supply them to run it.
-            </DialogDescription>
-          </DialogHeader>
-
-          <div className="flex flex-col gap-2">
-            {envDialogSpace?.secrets.map((name) => (
-              <div key={name} className="flex flex-col gap-1">
-                <label className="text-xs font-medium text-muted-foreground" htmlFor={`secret-${name}`}>
-                  {name}
-                </label>
-                <Input
-                  id={`secret-${name}`}
-                  type="password"
-                  value={envValues[name] ?? ""}
-                  onChange={(e) => setEnvValues((prev) => ({ ...prev, [name]: e.target.value }))}
-                />
-              </div>
-            ))}
-          </div>
-
-          <DialogFooter>
-            <Button variant="outline" onClick={closeEnvDialog}>
-              Cancel
-            </Button>
-            <Button onClick={confirmEnvLaunch}>
-              {envDialogKind === "build" ? "Build locally" : "Run"}
+              {adding ? "Adding..." : "Add"}
             </Button>
           </DialogFooter>
         </DialogContent>
