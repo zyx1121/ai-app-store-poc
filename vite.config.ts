@@ -3,8 +3,15 @@ import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import path from "node:path";
 import { readFileSync } from "node:fs";
+import { execSync } from "node:child_process";
 
 const tauriConf = JSON.parse(readFileSync(new URL("./src-tauri/tauri.conf.json", import.meta.url), "utf8"));
+
+// Short commit hash so two builds of the same version can be told apart in Setup.
+let commit = "unknown";
+try {
+  commit = execSync("git rev-parse --short HEAD", { stdio: ["ignore", "pipe", "ignore"] }).toString().trim();
+} catch {}
 
 // @ts-expect-error process is a nodejs global
 const host = process.env.TAURI_DEV_HOST;
@@ -12,7 +19,7 @@ const host = process.env.TAURI_DEV_HOST;
 // https://vite.dev/config/
 export default defineConfig(async () => ({
   plugins: [react(), tailwindcss()],
-  define: { __APP_VERSION__: JSON.stringify(tauriConf.version) },
+  define: { __APP_VERSION__: JSON.stringify(tauriConf.version), __APP_COMMIT__: JSON.stringify(commit) },
   resolve: { alias: { "@": path.resolve(__dirname, "./src") } },
 
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`

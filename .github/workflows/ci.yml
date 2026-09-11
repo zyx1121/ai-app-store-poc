@@ -44,6 +44,14 @@ jobs:
           path: src-tauri/target/release/bundle/msi/*.msi
           if-no-files-found: error
 
+  # package.json, tauri.conf.json, Cargo.toml and Cargo.lock must carry the same version.
+  version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - run: bun run bump --check
+
   fmt:
     runs-on: ubuntu-latest
     steps:

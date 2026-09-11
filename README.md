@@ -63,6 +63,16 @@ bun tauri build          # src-tauri/target/release/bundle/msi/*.msi
 
 `cargo test` and `cargo clippy --all-targets -- -D warnings` run inside `src-tauri/`; the frontend type-checks with `bun run build`.
 
+### Release
+
+The version lives in `package.json`, `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml` and `src-tauri/Cargo.lock`; CI fails when they disagree. To ship a version:
+
+```bash
+bun run bump 0.3.0       # rewrites every version file
+```
+
+Open a PR with the bump and merge it. The `release` workflow tags `v0.3.0`, builds and signs the MSI, and publishes it with `latest.json`, which the app's Setup page checks against. Setup shows the version and the short commit hash of the running build.
+
 ## How it works
 
 | Layer | What | Where |
@@ -79,7 +89,7 @@ How new AI PCs are supported (the accelerator adapter model and the device onboa
 ## Roadmap
 
 - [ ] Pre-baked distro rootfs shipped with the installer instead of provisioning on first run
-- [x] Auto-update for the app (tauri-plugin-updater; needs a public release host)
+- [x] Auto-update for the app (tauri-plugin-updater; latest.json on the latest GitHub Release)
 - [x] Hardware profile and per-vendor runtime (NVIDIA / AMD / Intel / CPU)
 - [x] Build Space images locally when the Hub has none for this GPU
 - [x] Native ROCm / XPU ComfyUI and Vulkan whisper.cpp on AMD / Intel (code complete; verified for the download, unpack and process plumbing until an AMD or Intel box runs it)
