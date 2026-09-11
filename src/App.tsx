@@ -48,16 +48,14 @@ function App() {
     setRoute("chat");
   }
 
-  // Each entry names what the screen does in plain words; the hint is the
-  // second line, so "Images" reads as text-to-image at a glance, not a gallery.
-  const navItems: { key: Route; label: string; hint: string; icon: typeof StoreIcon }[] = [
-    { key: "store", label: "Store", hint: "Hugging Face apps and models", icon: StoreIcon },
-    { key: "running", label: "Running", hint: "What is launched now", icon: Play },
-    { key: "chat", label: "Chat", hint: "Talk to a language model", icon: MessageSquare },
-    { key: "speech", label: "Speech", hint: "Speech to text, text to speech", icon: Mic },
-    { key: "vision", label: "Vision", hint: "Ask about an image, detect objects", icon: Camera },
-    { key: "images", label: "Images", hint: "Text to image, image to image", icon: Image },
-    { key: "setup", label: "Setup", hint: "Runtime, hardware, updates", icon: Settings },
+  const navItems: { key: Route; label: string; icon: typeof StoreIcon }[] = [
+    { key: "store", label: "Store", icon: StoreIcon },
+    { key: "running", label: "Running", icon: Play },
+    { key: "chat", label: "Chat", icon: MessageSquare },
+    { key: "speech", label: "Speech", icon: Mic },
+    { key: "vision", label: "Vision", icon: Camera },
+    { key: "images", label: "Images", icon: Image },
+    { key: "setup", label: "Setup", icon: Settings },
   ];
 
   return (
@@ -66,22 +64,19 @@ function App() {
         <TitleBar />
         <div className="flex min-h-0 flex-1">
           <aside className="flex w-56 shrink-0 flex-col gap-1 border-r border-border p-3">
-            {navItems.map(({ key, label, hint, icon: Icon }) => (
+            {navItems.map(({ key, label, icon: Icon }) => (
               <button
                 key={key}
                 type="button"
                 disabled={needsSetup && key !== "setup"}
                 onClick={() => setRoute(key)}
                 className={cn(
-                  "flex items-start gap-2.5 rounded-lg px-2.5 py-1.5 text-left text-sm text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-50",
+                  "flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-sm text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-50",
                   activeScreen === key && "bg-muted text-foreground",
                 )}
               >
-                <Icon className="mt-0.5 size-4 shrink-0" />
-                <span className="flex min-w-0 flex-col">
-                  <span className="leading-5">{label}</span>
-                  <span className="text-[11px] leading-4 text-muted-foreground/80">{hint}</span>
-                </span>
+                <Icon className="size-4 shrink-0" />
+                <span className="min-w-0 truncate leading-5">{label}</span>
               </button>
             ))}
           </aside>

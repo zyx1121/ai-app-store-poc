@@ -575,7 +575,6 @@ export function Images() {
       <Card className="shrink-0">
         <CardHeader>
           <CardTitle>Models</CardTitle>
-          <CardDescription>Checkpoint required to generate images.</CardDescription>
         </CardHeader>
         <CardContent className="flex flex-col gap-2">
           {modelsError && (
@@ -738,8 +737,7 @@ export function Images() {
 
           <Card className="flex flex-col">
             <CardHeader>
-              <CardTitle>Source image</CardTitle>
-              <CardDescription>Optional. Set one to run image-to-image.</CardDescription>
+              <CardTitle>Source image (optional)</CardTitle>
             </CardHeader>
             <CardContent className="flex flex-col gap-3">
               {sourceImage ? (

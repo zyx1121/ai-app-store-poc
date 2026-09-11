@@ -337,11 +337,9 @@ function TokenCard() {
     <div className="flex flex-col gap-3 rounded-xl border border-border p-3">
       <div className="flex items-center gap-2">
         <span className="flex-1 text-sm font-medium">Hugging Face token</span>
+        <Badge variant="outline">Optional</Badge>
         {hasToken !== null && <Badge variant={hasToken ? "default" : "outline"}>{hasToken ? "set" : "not set"}</Badge>}
       </div>
-      <p className="text-xs text-muted-foreground">
-        Optional. Needed for gated models and Spaces that require an HF_TOKEN secret.
-      </p>
 
       {error && (
         <Alert variant="destructive">
@@ -483,13 +481,7 @@ export function Setup({
 
   return (
     <div className="mx-auto flex w-full max-w-3xl flex-col gap-4 p-6">
-      <div>
-        <h1 className="font-heading text-lg font-medium">Setup</h1>
-        <p className="text-sm text-muted-foreground">
-          Hardware, runtime, updates and storage. Apps and models run locally through WSL2, Docker
-          and Ollama.
-        </p>
-      </div>
+      <h1 className="font-heading text-lg font-medium">Setup</h1>
 
       {status && (
         <HardwareCard hardware={status.hardware} vendor={status.vendor} forced={status.vendor_forced} />

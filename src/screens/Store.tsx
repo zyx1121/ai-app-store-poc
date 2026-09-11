@@ -474,12 +474,7 @@ export function Store({ onLaunched }: { onLaunched: () => void }) {
   return (
     <div className="flex flex-col gap-4 p-6">
       {gpuDialog}
-      <div>
-        <h1 className="font-heading text-lg font-medium">Store</h1>
-        <p className="text-sm text-muted-foreground">
-          Apps (Hugging Face Spaces) and chat models (GGUF) that run on this machine.
-        </p>
-      </div>
+      <h1 className="font-heading text-lg font-medium">Store</h1>
 
       <Input
         value={query}

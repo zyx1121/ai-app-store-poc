@@ -570,8 +570,8 @@ export function Speech() {
             </CardTitle>
             <CardDescription>{whisper.url}</CardDescription>
             <p className="text-xs text-muted-foreground">
-              Speech to text on this GPU through Vulkan, as a native Windows process. While it runs,
-              recordings below go here instead of Speaches; text to speech stays on Speaches.
+              While it runs, recordings below go here instead of Speaches; text to speech stays on
+              Speaches.
             </p>
           </CardHeader>
           <CardContent className="flex flex-col gap-2">
@@ -635,11 +635,6 @@ export function Speech() {
         <Card>
           <CardHeader>
             <CardTitle>Models</CardTitle>
-            <CardDescription>
-              {whisperRunning
-                ? "Text-to-speech model below; speech to text goes to whisper.cpp while it runs."
-                : "Speech-to-text and text-to-speech models used below."}
-            </CardDescription>
           </CardHeader>
           <CardContent className="flex flex-col gap-3">
             {modelsError && (
@@ -691,7 +686,6 @@ export function Speech() {
         <Card>
           <CardHeader>
             <CardTitle>Record</CardTitle>
-            <CardDescription>Record a clip, then transcribe it.</CardDescription>
           </CardHeader>
           <CardContent className="flex flex-col gap-3">
             <div className="flex items-center gap-3">
@@ -739,7 +733,6 @@ export function Speech() {
         <Card>
           <CardHeader>
             <CardTitle>Ask a model</CardTitle>
-            <CardDescription>Send the transcript to a running model and hear the reply.</CardDescription>
           </CardHeader>
           <CardContent className="flex flex-col gap-3">
             <div className="flex items-center gap-2">
@@ -760,7 +753,7 @@ export function Speech() {
                 </SelectContent>
               </Select>
               {instances.length === 0 && (
-                <p className="text-sm text-muted-foreground">No running models. Launch one from the Store.</p>
+                <p className="text-sm text-muted-foreground">No running models</p>
               )}
               <span className="flex-1" />
               <Button

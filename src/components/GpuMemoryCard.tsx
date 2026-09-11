@@ -9,7 +9,7 @@ import {
 } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { residentLabel } from "@/components/GpuGate";
 
 const gb = (mb: number) => `${(mb / 1024).toFixed(1)} GB`;
@@ -73,9 +73,6 @@ export function GpuMemoryCard() {
             {gb(used)} of {gb(mem.budget_mb)} in use
           </span>
         </CardTitle>
-        <CardDescription>
-          One model family fits at a time; launching another asks before unloading these.
-        </CardDescription>
       </CardHeader>
       <CardContent className="flex flex-col gap-2">
         {mem.residents.length === 0 ? (
